@@ -1,3 +1,4 @@
+# Omniverse Kit & Isaac Sim core
 from omni.isaac.kit import SimulationApp
 
 # Launch Isaac Sim with GUI
@@ -8,53 +9,92 @@ import omni.kit.commands
 import omni.usd
 from omni.isaac.core import World
 from omni.isaac.core.utils.prims import create_prim
-from omni.isaac.core.prims import GeometryPrim, RigidPrim
+from omni.isaac.core.prims import RigidPrim
 from isaacsim.asset.importer.urdf import _urdf
 from omni.isaac.core.utils.stage import add_reference_to_stage
-from pxr import UsdLux, Sdf, UsdPhysics, Gf
-from pxr import UsdPhysics, PhysxSchema, Gf, PhysicsSchemaTools, UsdGeom
-from pxr import UsdGeom, Gf
-from isaacsim.core.api.controllers.articulation_controller import ArticulationController
+from pxr import UsdLux, Sdf, UsdPhysics, Gf, PhysicsSchemaTools, UsdGeom, Usd
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.prims import SingleArticulation
+
 import numpy as np
 import random
 
-# semi-Random initial pose and orientation for the gripper at the start of a trial
-def sample_random_pose_near(target_position: Gf.Vec3d, distance=0.5, yaw_jitter_deg=10.0):
-    # Pick a random point on the circle
-    angle = random.uniform(0, 2 * np.pi)
-    dx = distance * np.cos(angle)
-    dy = distance * np.sin(angle)
-    position = Gf.Vec3d(
-        target_position[0] + dx,
-        target_position[1] + dy,
-        target_position[2]
-    )
 
-    # Compute ideal yaw so gripper +X faces the box
-    vec_to_box = Gf.Vec3d(
-        target_position[0] - position[0],
-        target_position[1] - position[1],
-        0.0
-    )
-    ideal_yaw_rad = np.arctan2(vec_to_box[1], vec_to_box[0])
-    ideal_yaw_deg = np.degrees(ideal_yaw_rad)
+# Spawn a sphere at random sampled point on object and a cone aligned to normal of point
+def visualize_sample(point: np.ndarray, normal: np.ndarray, stage,
+                     sphere_path="/World/marker_sphere",
+                     cone_path  ="/World/normal_cone",
+                     sphere_radius=0.01,
+                     cone_length =0.1,
+                     cone_radius =0.005):
+    # Sphere marker
+    sphere = UsdGeom.Sphere.Define(stage, sphere_path)
+    sphere.GetRadiusAttr().Set(sphere_radius)
+    xf_s = UsdGeom.Xformable(sphere.GetPrim())
+    xf_s.ClearXformOpOrder()
+    xf_s.AddTranslateOp().Set(Gf.Vec3d(*point.tolist()))
 
-    # Add some jitter around that ideal yaw
-    yaw_deg = ideal_yaw_deg + random.uniform(-yaw_jitter_deg, yaw_jitter_deg)
+    # Cone marker (points +Z normal)
+    cone = UsdGeom.Cone.Define(stage, cone_path)
+    cone.GetHeightAttr().Set(cone_length)
+    cone.GetRadiusAttr().Set(cone_radius)
 
-    # Build quaternion for that Z‑axis rotation
-    q = Gf.Rotation(Gf.Vec3d(0, 0, 1), yaw_deg).GetQuaternion()
-    orientation = [
-        q.GetImaginary()[0],
-        q.GetImaginary()[1],
-        q.GetImaginary()[2],
-        q.GetReal()
-    ]
-    return position, orientation
+    # compute rotation from +Z to normal
+    z = np.array([0.0, 0.0, 1.0])
+    n = normal / np.linalg.norm(normal)
+    dot = float(np.dot(z, n))
+    if abs(dot) < 0.9999:
+        axis = np.cross(z, n)
+        angle = np.degrees(np.arccos(dot))
+        rot  = Gf.Rotation(Gf.Vec3d(*axis.tolist()), angle)
+    else:
+        rot = Gf.Rotation(Gf.Vec3d(1,0,0), 0 if dot>0 else 180)
 
-def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.002):
+    xf_mat = Gf.Matrix4d().SetRotate(rot)
+    xf_mat.SetTranslateOnly(Gf.Vec3d(*point.tolist()))
+    xf_c   = UsdGeom.Xformable(cone.GetPrim())
+    xf_c.ClearXformOpOrder()
+    xf_c.AddTransformOp().Set(xf_mat)
+
+#     return Gf.Vec3d(*pos_np.tolist()), orientation
+def sample_approach_pose(point: np.ndarray,
+                         normal: np.ndarray,
+                         standoff: float = 0.5,
+                         roll_deg: float = 0.0):
+    """
+    Place the gripper at point + normal*standoff, with its local +Z axis
+    aligned to -normal (so the fingers approach along the surface normal),
+    then optionally roll around that axis.
+    Returns (Gf.Vec3d position, [x,y,z,w] orientation).
+    """
+    # position a bit out along the normal
+    n = normal / np.linalg.norm(normal)
+    pos = point + n * standoff
+
+    # find rotation that sends +Z → -n (approach vector)
+    target = Gf.Vec3d(*(-n).tolist())
+    # if your normal is exactly +Z or -Z, the constructor still works:
+    rot_to_n = Gf.Rotation(Gf.Vec3d(0,0,1), target)
+
+    # apply a roll about that same axis
+    if abs(roll_deg) > 1e-3:
+        roll_rot = Gf.Rotation(target, roll_deg)
+        rot_to_n = roll_rot * rot_to_n
+
+    # extract quaternion
+    q = rot_to_n.GetQuaternion()
+    ori = [q.GetImaginary()[0],
+           q.GetImaginary()[1],
+           q.GetImaginary()[2],
+           q.GetReal()]
+
+    return Gf.Vec3d(*pos.tolist()), ori
+
+
+
+
+#TODO: Use rays and contact points and distance from center of gripper to know when reach object and should grasp
+def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.001):
     current_pos, _ = gripper.get_world_pose()
     direction = np.array([target[0], target[1], target[2]]) - np.array(current_pos)
     distance = np.linalg.norm(direction)
@@ -66,53 +106,136 @@ def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size
     gripper.set_world_pose(position=new_pos)
     return True
 
-
-def reset_scene(gripper, cracker_box, target_position):
-    # Reset the box 
+def reset_scene(gripper, cracker_box):
+    # reset the box
     cracker_box.set_world_pose(
-        position=[0.0, 0.0, 1.0],
-        orientation=[0.0, 0.0, 0.0, 1.0]
+        position    = [0.0, 0.0, 1.0],
+        orientation = [0.0, 0.0, 0.0, 1.0]
     )
 
-    # Sample a brand‑new pose
-    new_pos, new_ori = sample_random_pose_near(target_position)
+    # sample a new point+normal
+    point, normal = sample_point_and_normal("/World/CrackerBox")
+    print(f"Resampled point: {point}, normal: {normal}")
+    visualize_sample(point, normal, stage)
 
-    # Restart the sim
+    # compute a rough “standoff” pose along the normal
+    rough_pos, rough_ori = sample_approach_pose(
+        point, normal,
+        standoff = 0.3,
+        roll_deg = random.uniform(-5, 5)
+    )
+
+    # restart sim, teleport to that rough pose
     world.reset()
     gripper.initialize()
-
-    # Teleport the gripper 
     gripper.set_world_pose(
-        position=new_pos,
-        orientation=new_ori
+        position    = rough_pos,
+        orientation = rough_ori
     )
+
+    # get the static root→TCP transform
+    tcp_path           = f"{gripper.prim_path}/joints/panda_hand/panda_grasptarget"
+    tcp_prim           = stage.GetPrimAtPath(tcp_path)
+    xform_cache        = UsdGeom.XformCache()
+    static_root_to_tcp = xform_cache.GetLocalToWorldTransform(tcp_prim)
+
+    # build a Matrix4d for our rough root→world
+    rot = Gf.Rotation(Gf.Quatd(
+        rough_ori[3],  # w
+        rough_ori[0],  # x
+        rough_ori[1],  # y
+        rough_ori[2],  # z
+    ))
+    root_to_world = Gf.Matrix4d()
+    root_to_world.SetRotate(rot)
+    root_to_world.SetTranslateOnly(rough_pos)
+
+    # desired world TCP = (rough root→world) × (static root→TCP)
+    world_to_tcp = root_to_world * static_root_to_tcp
+
+    # solve for new_root→world so that TCP lands exactly:
+    #    new_root→world = world→TCP × inv(static_root→TCP)
+    new_root_to_world = world_to_tcp * static_root_to_tcp.GetInverse()
+
+    # extract new root pos & ori
+    new_pos = new_root_to_world.ExtractTranslation()
+    new_rot = new_root_to_world.ExtractRotation().GetQuaternion()
+    new_ori = [
+        new_rot.GetImaginary()[0],
+        new_rot.GetImaginary()[1],
+        new_rot.GetImaginary()[2],
+        new_rot.GetReal()
+    ]
+
+    # teleport
+    gripper.set_world_pose(
+        position    = new_pos,
+        orientation = new_ori
+    )
+
+    # open the gripper
     gripper.apply_action(open_action)
+    return point, normal
 
-# Initialize simulation world
-world = World(stage_units_in_meters=1.0)
-stage = omni.usd.get_context().get_stage()
 
-# Define physics scene and set gravity
-scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/physicsScene"))
-scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
-scene.CreateGravityMagnitudeAttr().Set(0.0)
+# Sample a random point on 
+def sample_point_and_normal(xform_path: str):
+    stage = omni.usd.get_context().get_stage()
 
-# Add ground plane
-PhysicsSchemaTools.addGroundPlane(
-    stage,
-    "/World/groundPlane",
-    "Z",
-    15,
-    Gf.Vec3f(0, 0, 0),
-    Gf.Vec3f(0.7)
-)
+    # find the Mesh prim
+    root = stage.GetPrimAtPath(xform_path)
+    mesh_prim = None
+    for prim in Usd.PrimRange(root):
+        if prim.IsA(UsdGeom.Mesh):
+            mesh_prim = prim
+            break
+    if mesh_prim is None:
+        raise RuntimeError(f"No Mesh found under {xform_path}")
 
-# Add a dome light because isaac starts fully dark for some reason?
-dome_path = Sdf.Path("/World/DomeLight")
-if not stage.GetPrimAtPath(dome_path):
-    dome = UsdLux.DomeLight.Define(stage, dome_path)
-    dome.CreateIntensityAttr(750.0)
-    dome.CreateColorAttr((1.0, 1.0, 1.0))
+    mesh = UsdGeom.Mesh(mesh_prim)
+
+    # pull points & indices
+    verts_attr = mesh.GetPointsAttr().Get()
+    idxs_attr  = mesh.GetFaceVertexIndicesAttr().Get()
+    if verts_attr is None or idxs_attr is None:
+        raise RuntimeError(f"Mesh at {mesh_prim.GetPath()} has no points or indices")
+    verts = np.array([[p[0], p[1], p[2]] for p in verts_attr])
+    tris  = np.array(idxs_attr, dtype=int).reshape(-1, 3)
+
+    # compute triangle areas & sampling probabilities
+    v0 = verts[tris[:,0]]; v1 = verts[tris[:,1]]; v2 = verts[tris[:,2]]
+    areas = 0.5 * np.linalg.norm(np.cross(v1-v0, v2-v0), axis=1)
+    probs = areas / areas.sum()
+
+    # pick one tri and a random barycentric point
+    ti = np.random.choice(len(probs), p=probs)
+    a, b, c = tris[ti]
+    u, v = np.random.rand(), np.random.rand()
+    if u+v > 1.0:
+        u, v = 1-u, 1-v
+    w = 1 - u - v
+    local_pt = w*verts[a] + u*verts[b] + v*verts[c]
+
+    # face-normal (flat shading)
+    local_n = np.cross(verts[b]-verts[a], verts[c]-verts[a])
+    local_n /= np.linalg.norm(local_n)
+
+    # transform to world
+    xform_cache = UsdGeom.XformCache()
+    mat = xform_cache.GetLocalToWorldTransform(mesh_prim)
+    rot3d = mat.ExtractRotationMatrix()
+
+    # world-space point (uses full 4×4)
+    wp = mat.Transform(Gf.Vec3d(*local_pt))
+
+    # world-space normal (rotate only via 3×3)
+    rn_gf = rot3d * Gf.Vec3d(*local_n)
+
+    world_pt = np.array([wp[i] for i in range(3)])
+    world_n  = np.array([rn_gf[i] for i in range(3)])
+    world_n /= np.linalg.norm(world_n)
+
+    return world_pt, world_n
 
 # Function to import a URDF robot
 def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation_deg=90):
@@ -156,7 +279,28 @@ def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation
 
     return robot
 
-# Create CrackerBox object
+#### SETUP WORLD ####
+# Initialize simulation world
+world = World(stage_units_in_meters=1.0)
+stage = omni.usd.get_context().get_stage()
+
+# Define physics scene and set gravity
+scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/physicsScene"))
+scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
+scene.CreateGravityMagnitudeAttr().Set(0.0)
+
+# Add ground plane
+PhysicsSchemaTools.addGroundPlane(stage, "/World/groundPlane", "Z", 15,
+                                Gf.Vec3f(0,0,0), Gf.Vec3f(0.7))
+
+# Add a dome light because isaac starts fully dark for some reason?
+dome_path = Sdf.Path("/World/DomeLight")
+if not stage.GetPrimAtPath(dome_path):
+    dome = UsdLux.DomeLight.Define(stage, dome_path)
+    dome.CreateIntensityAttr(750.0)
+    dome.CreateColorAttr((1.0, 1.0, 1.0))
+
+    # Create CrackerBox object
 create_prim(
     prim_path="/World/CrackerBox",
     prim_type="Xform",
@@ -177,22 +321,18 @@ UsdPhysics.CollisionAPI.Apply(collision_box.prim)
 # Add box to the simulation scene
 world.scene.add(collision_box)
 
-target_pos = Gf.Vec3d(0.0, 0.0, 1.0) 
-
-start_pos, start_ori = sample_random_pose_near(target_pos)
 gripper = import_urdf_model(
     "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
-    position=start_pos,
-    rotation_deg=0 
-)
-gripper.set_world_pose(position=start_pos, orientation=start_ori)
-
-# Start simulation loop
-world.reset()
-gripper.initialize()
+    position=Gf.Vec3d(0, 0, 0), rotation_deg=0)
 
 close_action = ArticulationAction(joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
 open_action = ArticulationAction(joint_positions=np.array([0.04, 0.04])) # joint_indices=np.array())
+
+point, normal = reset_scene(gripper, collision_box)
+
+world.reset()
+gripper.initialize()
+
 
 grasped = False
 trial = 0
@@ -201,17 +341,9 @@ count = 0
 
 while trial < max_trials:
     world.step(render=True)
-
-    if not grasped:
-        #TODO: fix when the gripper grasps (based in distance from center of gripper to object contact point)
-        if not move_gripper_toward(gripper, target_pos):
-            gripper.apply_action(close_action)
-            grasped = True
-    else:
-        gripper.apply_action(close_action)
-        if count > 100:
-            reset_scene(gripper, collision_box, target_pos)
-            grasped = False
+    move_gripper_toward(gripper, point)
+    if count > 250:
+            point, normal = reset_scene(gripper, collision_box)
             count = 0
             trial += 1
             print(f"Trial {trial} complete. Resetting scene.")
