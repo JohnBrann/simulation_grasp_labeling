@@ -28,21 +28,21 @@ def visualize_sample(point: np.ndarray, normal: np.ndarray, stage,
                      cone_length =0.1,
                      cone_radius =0.005):
     # Sphere marker
-    sphere = UsdGeom.Sphere.Define(stage, sphere_path)
-    sphere.GetRadiusAttr().Set(sphere_radius)
-    xf_s = UsdGeom.Xformable(sphere.GetPrim())
-    xf_s.ClearXformOpOrder()
-    xf_s.AddTranslateOp().Set(Gf.Vec3d(*point.tolist()))
+    sphere = UsdGeom.Sphere.Define(stage, sphere_path) # create sphere
+    sphere.GetRadiusAttr().Set(sphere_radius) #radius
+    xf_s = UsdGeom.Xformable(sphere.GetPrim()) # gets prim behind object that will let us transform it
+    xf_s.ClearXformOpOrder() # removes old rotation and translation cache
+    xf_s.AddTranslateOp().Set(Gf.Vec3d(*point.tolist())) # translates sphere to desired location
 
-    # Cone marker (points +Z normal)
+    # Cone marker
     cone = UsdGeom.Cone.Define(stage, cone_path)
     cone.GetHeightAttr().Set(cone_length)
     cone.GetRadiusAttr().Set(cone_radius)
 
-    # compute rotation from +Z to normal
-    z = np.array([0.0, 0.0, 1.0])
-    n = normal / np.linalg.norm(normal)
-    dot = float(np.dot(z, n))
+    # compute rotation normal
+    z = np.array([0.0, 0.0, 1.0]) # up direction
+    n = normal / np.linalg.norm(normal) # normalize surface normal
+    dot = float(np.dot(z, n)) # dot product 
     if abs(dot) < 0.9999:
         axis = np.cross(z, n)
         angle = np.degrees(np.arccos(dot))
@@ -50,13 +50,15 @@ def visualize_sample(point: np.ndarray, normal: np.ndarray, stage,
     else:
         rot = Gf.Rotation(Gf.Vec3d(1,0,0), 0 if dot>0 else 180)
 
+    # Plae sphere into place with above normal calcutions
     xf_mat = Gf.Matrix4d().SetRotate(rot)
     xf_mat.SetTranslateOnly(Gf.Vec3d(*point.tolist()))
     xf_c   = UsdGeom.Xformable(cone.GetPrim())
     xf_c.ClearXformOpOrder()
     xf_c.AddTransformOp().Set(xf_mat)
 
-#     return Gf.Vec3d(*pos_np.tolist()), orientation
+# At the beginning of an attempt, the gripper is spawned at a location n distance from the point sampled from the mesh
+# in direction based on the normal of the mesh that we calculate
 def sample_approach_pose(point: np.ndarray,
                          normal: np.ndarray,
                          standoff: float = 0.5,
@@ -77,9 +79,9 @@ def sample_approach_pose(point: np.ndarray,
     rot_to_n = Gf.Rotation(Gf.Vec3d(0,0,1), target)
 
     # apply a roll about that same axis
-    if abs(roll_deg) > 1e-3:
-        roll_rot = Gf.Rotation(target, roll_deg)
-        rot_to_n = roll_rot * rot_to_n
+    # if abs(roll_deg) > 1e-3:
+    #     roll_rot = Gf.Rotation(target, roll_deg)
+    #     rot_to_n = roll_rot * rot_to_n
 
     # extract quaternion
     q = rot_to_n.GetQuaternion()
@@ -89,7 +91,6 @@ def sample_approach_pose(point: np.ndarray,
            q.GetReal()]
 
     return Gf.Vec3d(*pos.tolist()), ori
-
 
 
 
@@ -182,7 +183,7 @@ def reset_scene(gripper, cracker_box):
 def sample_point_and_normal(xform_path: str):
     stage = omni.usd.get_context().get_stage()
 
-    # find the Mesh prim
+    # find the Mesh prim of the desired object
     root = stage.GetPrimAtPath(xform_path)
     mesh_prim = None
     for prim in Usd.PrimRange(root):
@@ -194,20 +195,22 @@ def sample_point_and_normal(xform_path: str):
 
     mesh = UsdGeom.Mesh(mesh_prim)
 
-    # pull points & indices
+    # get points and indices
     verts_attr = mesh.GetPointsAttr().Get()
     idxs_attr  = mesh.GetFaceVertexIndicesAttr().Get()
     if verts_attr is None or idxs_attr is None:
         raise RuntimeError(f"Mesh at {mesh_prim.GetPath()} has no points or indices")
+
+    # converts points to npy, assuming all faces are triangles
     verts = np.array([[p[0], p[1], p[2]] for p in verts_attr])
     tris  = np.array(idxs_attr, dtype=int).reshape(-1, 3)
 
-    # compute triangle areas & sampling probabilities
+    # compute triangles areas and sampling probabilities
     v0 = verts[tris[:,0]]; v1 = verts[tris[:,1]]; v2 = verts[tris[:,2]]
     areas = 0.5 * np.linalg.norm(np.cross(v1-v0, v2-v0), axis=1)
     probs = areas / areas.sum()
 
-    # pick one tri and a random barycentric point
+    # pick one triangle and a random barycentric point (get point on mesh)
     ti = np.random.choice(len(probs), p=probs)
     a, b, c = tris[ti]
     u, v = np.random.rand(), np.random.rand()
@@ -216,11 +219,12 @@ def sample_point_and_normal(xform_path: str):
     w = 1 - u - v
     local_pt = w*verts[a] + u*verts[b] + v*verts[c]
 
-    # face-normal (flat shading)
+    # compute the face normal of selected triangle
     local_n = np.cross(verts[b]-verts[a], verts[c]-verts[a])
     local_n /= np.linalg.norm(local_n)
 
-    # transform to world
+    # transform to world, get the point in respect to the world
+    #   so we know where to put the visual markers
     xform_cache = UsdGeom.XformCache()
     mat = xform_cache.GetLocalToWorldTransform(mesh_prim)
     rot3d = mat.ExtractRotationMatrix()
@@ -230,7 +234,8 @@ def sample_point_and_normal(xform_path: str):
 
     # world-space normal (rotate only via 3×3)
     rn_gf = rot3d * Gf.Vec3d(*local_n)
-
+    
+    # convert to npy and normalize
     world_pt = np.array([wp[i] for i in range(3)])
     world_n  = np.array([rn_gf[i] for i in range(3)])
     world_n /= np.linalg.norm(world_n)
@@ -323,7 +328,7 @@ world.scene.add(collision_box)
 
 gripper = import_urdf_model(
     "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
-    position=Gf.Vec3d(0, 0, 0), rotation_deg=0)
+    position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
 
 close_action = ArticulationAction(joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
 open_action = ArticulationAction(joint_positions=np.array([0.04, 0.04])) # joint_indices=np.array())
