@@ -20,7 +20,7 @@ import omni.replicator.core as rep
 import omni
 import asyncio
 from isaacsim.sensors.physx import _range_sensor 
-
+from omni.kit.viewport.utility import get_active_viewport
 import numpy as np
 import random
 
@@ -96,6 +96,58 @@ def look_at_point(cone_path: str, target_pos: np.ndarray, point: np.ndarray):
 
     xf.AddTransformOp().Set(mat)
 
+def move_gripper_to_lidar(gripper: SingleArticulation,
+                          lidar_path: str = "/World/lidar_cone/Lidar"):
+
+    stage = omni.usd.get_context().get_stage()
+    xform_cache = UsdGeom.XformCache()
+    prim = stage.GetPrimAtPath(lidar_path)
+    if not prim or not prim.IsValid():
+        raise RuntimeError(f"No valid prim at {lidar_path}")
+
+    # 1) Get the full local→world transform
+    world_mat = xform_cache.GetLocalToWorldTransform(prim)
+
+    # 2) Extract translation
+    trans = world_mat.ExtractTranslation()  # Gf.Vec3d
+
+    # 3) Extract rotation as quaternion
+    base_quat = world_mat.ExtractRotation().GetQuat()  # Gf.Quatd
+    # IsaacSim wants [x,y,z,w]
+
+    pitch_offset = Gf.Rotation(Gf.Vec3d(0,1,0), 90.0).GetQuat()
+    look_quat = pitch_offset * base_quat
+    
+    look_rot = Gf.Rotation(look_quat)
+    forward_ws = look_rot.TransformDir(Gf.Vec3d(1,0,0))
+
+    noise_angle = random.randint(-90, 90)
+
+    angle_range = 90
+
+    noise_angle = random.choice(range(-angle_range, angle_range, 10))
+    print(f'Noise angle: {noise_angle}')
+    # #    Build a small quaternion about that forward axis
+    noise_quat = Gf.Rotation(forward_ws, noise_angle).GetQuat()
+
+    # 6) Compose: apply the twist _after_ pointing
+    # final_quat = look_quat
+    final_quat = noise_quat * look_quat
+
+    # final_quat = pitch_quat * noise
+    ori = [
+        look_quat.GetImaginary()[0],
+        look_quat.GetImaginary()[1],
+        look_quat.GetImaginary()[2],
+        look_quat.GetReal()
+    ]   
+
+    # 4) Teleport your gripper
+    gripper.set_world_pose(
+        position    = [trans[0], trans[1], trans[2]],
+        orientation = ori
+    )
+
 #TODO: Use rays and contact points and distance from center of gripper to know when reach object and should grasp
 def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.001):
     current_pos, _ = gripper.get_world_pose()
@@ -122,14 +174,24 @@ def reset_scene(stage, gripper, model, centroid):
 
     # Sample point around object and look at point
     view_pos = position_lidar(centroid, 0.3)
+    # print(f'view pos: {view_pos}')
+    # view_pos = np.array([-0.04163335, -0.05821681, 0.81332028])
 
     # Sample single point and lidar pose
     sampled_point = sample_single_mesh_point("/World/CrackerBox")
+    # print(f"sampled point {sampled_point}")
+    # sampled_point = np.array([-0.04691, -0.081479, 1.17597795])
+
     visualize_point_sample(sampled_point, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0))
     look_at_point("/World/lidar_cone", target_pos=view_pos, point=sampled_point)
 
+    
+
+    move_gripper_to_lidar(gripper)
     # open the gripper
-    # gripper.apply_action(open_action)
+    gripper.apply_action(open_action)
+
+    return sampled_point
 
 
 # TODO: Get points once and store them into a list 
@@ -158,7 +220,7 @@ def get_mesh_points(xform_path: str):
     verts = np.array([[p[0], p[1], p[2]] for p in verts_attr])
     tris  = np.array(idxs_attr, dtype=int).reshape(-1, 3)
 
-    print(f'Verts {verts.shape}')
+    # print(f'Verts {verts.shape}')
     return verts
 
 def sample_single_mesh_point(xform_path: str):
@@ -233,11 +295,9 @@ def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
     xform.ClearXformOpOrder()
     xform.AddTransformOp().Set(mat)
-    # straight gangsta
 
     robot = SingleArticulation(prim_path=prim_path, name="panda")
     world.scene.add(robot)
-
     return robot
 
 #### SETUP WORLD ####
@@ -315,8 +375,8 @@ result, lidar = omni.kit.commands.execute(
             draw_lines=True,
             horizontal_fov=3.0,
             vertical_fov=3.0,
-            horizontal_resolution=0.5,
-            vertical_resolution=0.5,
+            horizontal_resolution=1,
+            vertical_resolution=1,
             rotation_rate=0.0,
             high_lod=True,
             yaw_offset=0.0,
@@ -348,16 +408,16 @@ trial = 0
 max_trials = 100
 count = 0
 
-reset_scene(stage, gripper, collision_object, centroid)
+target_point = reset_scene(stage, gripper, collision_object, centroid)
 
 while trial < max_trials:
     world.step(render=True)
-    # move_gripper_toward(gripper, point)
+    move_gripper_toward(gripper, target_point)
     # depth = lidarInterface.get_linear_depth_data(lidarPath)
     # print("depth", depth)   
 
-    if count > 1000:
-            reset_scene(stage, gripper, collision_object, centroid)
+    if count > 200:
+            target_point = reset_scene(stage, gripper, collision_object, centroid)
             count = 0
             trial += 1
             print(f"Trial {trial} complete. Resetting scene.")
