@@ -24,7 +24,6 @@ from omni.kit.viewport.utility import get_active_viewport
 import numpy as np
 import random
 
-
 def visualize_point_sample(point: np.ndarray, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0)):
     # Sphere marker
     color_normalized = [c / 255.0 for c in color]
@@ -105,41 +104,28 @@ def move_gripper_to_lidar(gripper: SingleArticulation,
     if not prim or not prim.IsValid():
         raise RuntimeError(f"No valid prim at {lidar_path}")
 
-    # 1) Get the full local→world transform
+    # Get the full local→world transform
     world_mat = xform_cache.GetLocalToWorldTransform(prim)
 
-    # 2) Extract translation
+    # Extract translation
     trans = world_mat.ExtractTranslation()  # Gf.Vec3d
 
     # 3) Extract rotation as quaternion
     base_quat = world_mat.ExtractRotation().GetQuat()  # Gf.Quatd
-    # IsaacSim wants [x,y,z,w]
-
-    pitch_offset = Gf.Rotation(Gf.Vec3d(0,1,0), 90.0).GetQuat()
-    look_quat = pitch_offset * base_quat
-    
-    look_rot = Gf.Rotation(look_quat)
-    forward_ws = look_rot.TransformDir(Gf.Vec3d(1,0,0))
-
-    noise_angle = random.randint(-90, 90)
 
     angle_range = 90
-
     noise_angle = random.choice(range(-angle_range, angle_range, 10))
-    print(f'Noise angle: {noise_angle}')
-    # #    Build a small quaternion about that forward axis
-    noise_quat = Gf.Rotation(forward_ws, noise_angle).GetQuat()
 
-    # 6) Compose: apply the twist _after_ pointing
-    # final_quat = look_quat
-    final_quat = noise_quat * look_quat
+    wrist_offset = Gf.Rotation(Gf.Vec3d(1,0,0), noise_angle).GetQuat()
+    pitch_offset = Gf.Rotation(Gf.Vec3d(0,1,0), 90.0).GetQuat()
+    final_quat = wrist_offset * pitch_offset * base_quat
 
     # final_quat = pitch_quat * noise
     ori = [
-        look_quat.GetImaginary()[0],
-        look_quat.GetImaginary()[1],
-        look_quat.GetImaginary()[2],
-        look_quat.GetReal()
+        final_quat.GetImaginary()[0],
+        final_quat.GetImaginary()[1],
+        final_quat.GetImaginary()[2],
+        final_quat.GetReal()
     ]   
 
     # 4) Teleport your gripper
@@ -149,7 +135,7 @@ def move_gripper_to_lidar(gripper: SingleArticulation,
     )
 
 #TODO: Use rays and contact points and distance from center of gripper to know when reach object and should grasp
-def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.001):
+def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.0005):
     current_pos, _ = gripper.get_world_pose()
     direction = np.array([target[0], target[1], target[2]]) - np.array(current_pos)
     distance = np.linalg.norm(direction)
@@ -173,7 +159,7 @@ def reset_scene(stage, gripper, model, centroid):
     world.step(render=False)
 
     # Sample point around object and look at point
-    view_pos = position_lidar(centroid, 0.3)
+    view_pos = position_lidar(centroid, 0.4)
     # print(f'view pos: {view_pos}')
     # view_pos = np.array([-0.04163335, -0.05821681, 0.81332028])
 
@@ -185,9 +171,8 @@ def reset_scene(stage, gripper, model, centroid):
     visualize_point_sample(sampled_point, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0))
     look_at_point("/World/lidar_cone", target_pos=view_pos, point=sampled_point)
 
-    
-
     move_gripper_to_lidar(gripper)
+    
     # open the gripper
     gripper.apply_action(open_action)
 
@@ -264,7 +249,7 @@ def label_model(success):
 def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation_deg=90):
     import_config = _urdf.ImportConfig()
     import_config.convex_decomp = False # Disable convex decomposition for simplicity
-    import_config.fix_base = False # Fix the base of the robot to the ground
+    import_config.fix_base = True # Fix the base of the robot to the ground
     import_config.make_default_prim = False # Make the robot the default prim in the scene
     import_config.self_collision = False # Disable self-collision for performance
     import_config.distance_scale = 1.0 # Set distance scale for the robot
@@ -286,7 +271,6 @@ def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation
         urdf_robot=robot_model,
         import_config=import_config,
     )
-
     # Create and apply full transform (rotation + translation)
     rot = Gf.Rotation(Gf.Vec3d(0, 0, 1), rotation_deg)  # Rotate around Z axis
     mat = Gf.Matrix4d().SetRotate(rot)
@@ -325,7 +309,8 @@ if not stage.GetPrimAtPath(dome_path):
 create_prim(
     prim_path="/World/CrackerBox",
     prim_type="Xform",
-    usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
+    usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
 )
 
 # Wrap it in RigidPrim so the item is affected by gravity
@@ -369,8 +354,8 @@ result, lidar = omni.kit.commands.execute(
             "RangeSensorCreateLidar",
             path="/Lidar",
             parent="/World/lidar_cone",
-            min_range=0.0,
-            max_range=2.0,
+            min_range=0.2,
+            max_range=1.0,
             draw_points=True,
             draw_lines=True,
             horizontal_fov=3.0,
@@ -416,7 +401,7 @@ while trial < max_trials:
     # depth = lidarInterface.get_linear_depth_data(lidarPath)
     # print("depth", depth)   
 
-    if count > 200:
+    if count > 700:
             target_point = reset_scene(stage, gripper, collision_object, centroid)
             count = 0
             trial += 1
