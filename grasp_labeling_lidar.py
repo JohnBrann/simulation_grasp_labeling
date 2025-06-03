@@ -13,7 +13,7 @@ from omni.isaac.core.utils.prims import create_prim
 from omni.isaac.core.prims import RigidPrim
 from isaacsim.asset.importer.urdf import _urdf
 from omni.isaac.core.utils.stage import add_reference_to_stage
-from pxr import UsdLux, Sdf, UsdPhysics, Gf, PhysicsSchemaTools, UsdGeom, Usd, UsdShade
+from pxr import UsdLux, Sdf, UsdPhysics, Gf, PhysicsSchemaTools, UsdGeom, Usd, UsdShade, PhysxSchema
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.prims import SingleArticulation
 import omni.replicator.core as rep
@@ -21,8 +21,18 @@ import omni
 import asyncio
 from isaacsim.sensors.physx import _range_sensor 
 from omni.kit.viewport.utility import get_active_viewport
+from isaacsim.core.api.physics_context import PhysicsContext
+from isaacsim.sensors.physics import ContactSensor
 import numpy as np
 import random
+import math
+import carb
+from isaacsim.core.api.objects import DynamicCuboid, GroundPlane
+from isaacsim.core.api.world import World
+from isaacsim.core.utils.extensions import enable_extension
+from isaacsim.core.utils.prims import get_prim_at_path
+from isaacsim.sensors.physx import ProximitySensor, register_sensor, clear_sensors
+# from isaacsim.core.api.action import ArticulationAction
 
 def visualize_point_sample(point: np.ndarray, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0)):
     # Sphere marker
@@ -139,13 +149,76 @@ def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size
     current_pos, _ = gripper.get_world_pose()
     direction = np.array([target[0], target[1], target[2]]) - np.array(current_pos)
     distance = np.linalg.norm(direction)
-    if distance < step_size:
-        return False  # Reached
+    # if proximity_distance < step_size:
+    #     return True  # Reached
     direction = direction / distance  # Normalize
     new_pos = np.array(current_pos) + direction * step_size
     pose_mat = Gf.Matrix4d().SetTranslate(Gf.Vec3d(*new_pos))
     gripper.set_world_pose(position=new_pos)
-    return True
+    # return False
+
+def check_reached_target(proximity_distance, reach_threshold= 0.001):
+    if proximity_distance == None:
+        return False
+    elif proximity_distance < reach_threshold:
+        return True
+    return False 
+
+
+def apply_swing_shake(gripper: SingleArticulation, world: World,
+    amplitude_rad: float = 0.15, num_steps: int = 40):
+    
+    # current world pose once, before shaking:
+    base_pos, base_ori = gripper.get_world_pose()
+    
+    qx, qy, qz, qw = base_ori
+    base_quat = Gf.Quatd(
+        float(qw),  # real
+        float(qx),  # imag.x
+        float(qy),  # imag.y
+        float(qz)   # imag.z
+    )
+
+    # Store pivot position so the gripper doesn’t drift
+    pivot_pos = [float(base_pos[0]), float(base_pos[1]), float(base_pos[2])]
+
+    for i in range(num_steps):
+        theta = amplitude_rad * math.sin(2 * math.pi * i / num_steps)
+        deg = float(theta * (180.0 / math.pi))
+        axis = Gf.Vec3d(0.0, 0.0, 1.0)
+        yaw_delta_quat = Gf.Rotation(axis, deg).GetQuat()  # returns Gf.Quatd
+
+        # Q_new = base_quat * yaw_delta_quat (both are Quatd)
+        new_quat = Gf.Quatd(base_quat)  # ensure we have a Quatd copy
+        new_quat = new_quat * yaw_delta_quat
+
+        # Teleport the gripper to pivot_pos with orientation=new_quat
+        gripper.set_world_pose(
+            position = pivot_pos,
+            orientation = [
+                new_quat.GetImaginary()[0],  # qx
+                new_quat.GetImaginary()[1],  # qy
+                new_quat.GetImaginary()[2],  # qz
+                new_quat.GetReal()           # qw
+            ]
+        )
+
+        # Step physics so the shake is visible
+        world.step(render=True)
+
+    # Restore exactly to the original orientation Q0:
+    restore_quat = [
+        base_quat.GetImaginary()[0],
+        base_quat.GetImaginary()[1],
+        base_quat.GetImaginary()[2],
+        base_quat.GetReal()
+    ]
+    gripper.set_world_pose(position=pivot_pos, orientation=restore_quat)
+    world.step(render=True)
+
+# TODO: check whether the fingers are in contact with the mesh after shaking
+def check_finger_contact():
+    return
 
 def reset_scene(stage, gripper, model, centroid):
     # reset the box
@@ -177,7 +250,6 @@ def reset_scene(stage, gripper, model, centroid):
     gripper.apply_action(open_action)
 
     return sampled_point
-
 
 # TODO: Get points once and store them into a list 
 def get_mesh_points(xform_path: str):
@@ -333,9 +405,9 @@ gripper = import_urdf_model(
     "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
     position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
 
-close_action = ArticulationAction(joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
+effort_cmd = np.array([-0.0, -0.0], dtype=np.float32)
+close_action = ArticulationAction( joint_efforts = effort_cmd, joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
 open_action = ArticulationAction(joint_positions=np.array([0.04, 0.04])) # joint_indices=np.array())
-
 
 # Create Lidar cone
 cone = UsdGeom.Cone.Define(stage, "/World/lidar_cone")
@@ -388,24 +460,116 @@ centroid = calculate_centroid("/World/CrackerBox")
 print(f"Centroid: {centroid}")
 visualize_point_sample(centroid, stage, sphere_radius=0.005, color=(0,255,0))
 
+# Make it so makrer does not collide with anything
+marker_path = "/World/marker_sphere"
+marker_prim = stage.GetPrimAtPath(marker_path)
+if not marker_prim or not marker_prim.IsValid():
+    raise RuntimeError(f"Could not find prim at {marker_path!r}")
+
+# Apply a PhysX collider so ProximitySensor can “see” it.
+UsdPhysics.CollisionAPI.Apply(marker_prim)       
+PhysxSchema.PhysxCollisionAPI.Apply(marker_prim) 
+
+# Zero‐scale the sphere so its overlap box is exactly a point.
+xform = UsdGeom.Xformable(marker_prim)
+xform.ClearXformOpOrder()
+# We already translated it inside visualize_point_sample(...), so now just zero‐scale:
+xform.AddScaleOp().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+# Filter out any real contacts between this marker and your robot/CrackerBox.
+filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(marker_prim)
+filtered_pairs.CreateFilteredPairsRel().AddTarget("/panda")
+filtered_pairs.CreateFilteredPairsRel().AddTarget("/World/CrackerBox")
+
+enable_extension("isaacsim.sensors.physx")
+simulation_app.update()
+
+# Get grasptarget prim and confirm the prim exists:
+grasptarget_path = "/panda/panda_hand"
+grasptarget_prim = stage.GetPrimAtPath(grasptarget_path)
+if not grasptarget_prim or not grasptarget_prim.IsValid():
+    raise RuntimeError(f"No valid prim at {grasptarget_path}")
+
+
+# apply collision API's to gripper
+UsdPhysics.CollisionAPI.Apply(grasptarget_prim)
+PhysxSchema.PhysxCollisionAPI.Apply(grasptarget_prim)
+
+# Create prim offset for Proximity Sensor
+offset_path = grasptarget_path + "/sensor_offset"
+if stage.GetPrimAtPath(offset_path):
+    stage.RemovePrim(offset_path)
+offset_xform = UsdGeom.Xform.Define(stage, offset_path)
+offset_prim = stage.GetPrimAtPath(offset_path)#
+
+offset_api   = UsdGeom.XformCommonAPI(offset_xform)
+offset_api.SetTranslate(Gf.Vec3d(0.0, 0.0, 0.066)) #0.11 is TCP
+offset_api.SetScale(Gf.Vec3f(1.0, 1.0, 1.0))
+
+UsdPhysics.CollisionAPI.Apply(offset_prim)
+PhysxSchema.PhysxCollisionAPI.Apply(offset_prim)
+
+# Create Proximity Sensor
+clear_sensors()
+s = ProximitySensor(offset_prim)
+register_sensor(s)
+
+proximity_distance = None
+
+def print_proximity_data(_):
+    global proximity_distance
+    data = s.get_data()
+    if "/World/marker_sphere" in data:
+        dist     = data["/World/marker_sphere"]["distance"]
+        proximity_distance = dist
+        duration = data["/World/marker_sphere"]["duration"]
+        # print(f"Proximity to marker_sphere: distance={dist:.3f}, duration={duration:.3f}")
+        # print(f"Proximity to marker_sphere: distance={dist:.3f}")
+        return proximity_distance
+
+world.add_physics_callback("print_sensor", print_proximity_data)
+simulation_app.update()
+simulation_app.update()
+world.play()
+
 # Trials!!!!
 trial = 0
 max_trials = 100
 count = 0
+reached_target = False
 
 target_point = reset_scene(stage, gripper, collision_object, centroid)
 
 while trial < max_trials:
     world.step(render=True)
-    move_gripper_toward(gripper, target_point)
-    # depth = lidarInterface.get_linear_depth_data(lidarPath)
-    # print("depth", depth)   
+    # print(f'proximity distance: {proximity_distance}') 
+    reached_target = check_reached_target(proximity_distance, reach_threshold=0.001)
+    # move_gripper_toward(gripper, target_point)
+    
+    if reached_target:
+        # stop moving gripper, perform shake action
+        gripper.apply_action(close_action)
+        world.step(render=True)
+        world.step(render=True)
+        apply_swing_shake(gripper,  # or wherever your gripper prim is
+                  world=world,
+                  amplitude_rad=0.5,   # ~7° each side
+                  num_steps=300)   
+        reached_target = False
+        target_point = reset_scene(stage, gripper, collision_object, centroid)
+        # if object_in_gripper():
 
-    if count > 700:
-            target_point = reset_scene(stage, gripper, collision_object, centroid)
-            count = 0
-            trial += 1
-            print(f"Trial {trial} complete. Resetting scene.")
-    count += 1
+    else:
+        move_gripper_toward(gripper, target_point)
+    
+    # depth = lidarInterface.get_linear_depth_data(lidarPath)
+    # print("depth", depth)  
+    
+    # if count > 1000:
+    #         target_point = reset_scene(stage, gripper, collision_object, centroid)
+    #         count = 0
+    #         trial += 1
+    #         print(f"Trial {trial} complete. Resetting scene.")
+    # count += 1
 # Close the simulator
 simulation_app.close()
