@@ -32,7 +32,9 @@ from isaacsim.core.api.world import World
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.prims import get_prim_at_path
 from isaacsim.sensors.physx import ProximitySensor, register_sensor, clear_sensors
+from isaacsim.core.api.robots import Robot
 # from isaacsim.core.api.action import ArticulationAction
+import os
 
 def visualize_point_sample(point: np.ndarray, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0)):
     # Sphere marker
@@ -126,9 +128,15 @@ def move_gripper_to_lidar(gripper: SingleArticulation,
     angle_range = 90
     noise_angle = random.choice(range(-angle_range, angle_range, 10))
 
-    wrist_offset = Gf.Rotation(Gf.Vec3d(1,0,0), noise_angle).GetQuat()
-    pitch_offset = Gf.Rotation(Gf.Vec3d(0,1,0), 90.0).GetQuat()
-    final_quat = wrist_offset * pitch_offset * base_quat
+    # FOR HAND-E gripper
+    wrist_offset = Gf.Rotation(Gf.Vec3d(0,0,1), noise_angle).GetQuat()
+    pitch_offset = Gf.Rotation(Gf.Vec3d(1,0,0), -90.0).GetQuat()
+    final_quat = pitch_offset * wrist_offset * base_quat
+
+    # FOR Panda Gripper
+    # wrist_offset = Gf.Rotation(Gf.Vec3d(1,0,0), noise_angle).GetQuat()
+    # pitch_offset = Gf.Rotation(Gf.Vec3d(0,1,0), 90.0).GetQuat()
+    # final_quat = wrist_offset * pitch_offset * base_quat
 
     # final_quat = pitch_quat * noise
     ori = [
@@ -381,8 +389,9 @@ if not stage.GetPrimAtPath(dome_path):
 create_prim(
     prim_path="/World/CrackerBox",
     prim_type="Xform",
-    usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
-    # usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
+    usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/engine/engine.usd"
 )
 
 # Wrap it in RigidPrim so the item is affected by gravity
@@ -396,14 +405,56 @@ collision_object = RigidPrim(
 )
 
 # Enable collision on the box by using the collision api
-UsdPhysics.CollisionAPI.Apply(collision_object.prim)
+collision_api = UsdPhysics.CollisionAPI.Apply(collision_object.prim)
+# # use the raw triangle mesh for collision (and LiDAR raycasts)
+# collision_api.GetCollisionApproximationAttr().Set("none")
+
+# mesh_api = UsdPhysics.MeshCollisionAPI.Apply(collision_object.prim)
+
+# # 4) Tell PhysX “none” → use raw triangles instead of convex hull
+# approx_attr = mesh_api.CreateApproximationAttr()
+# approx_attr.Set("none")
+
 
 # Add box to the simulation scene
 world.scene.add(collision_object)
 
-gripper = import_urdf_model(
-    "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
-    position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
+###### ADD GRIPPER #######
+# gripper = import_urdf_model(
+#     "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
+#     position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
+
+
+# Reference the standalone Robotiq Hand-E USD
+assets_dir = "/home/csrobot/Isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
+usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_base.usd")
+prim_path = "/robotiq_gripper"
+add_reference_to_stage(
+    usd_path=usd_path,
+    prim_path=prim_path
+)
+
+# wrap the prim as a robot (articulation)
+gripper = Robot(
+    prim_path=prim_path,
+    name="Hand-E",
+    position=[0.0, 0.5, 0.5],       # ← move the root 1 m up in world‐space
+)
+
+# Create and apply full transform (rotation + translation)
+# rot = Gf.Rotation(Gf.Vec3d(0, 0, 1), 0.0)  # Rotate around Z axis
+# mat = Gf.Matrix4d().SetRotate(rot)
+# # mat.SetTranslateOnly(position)
+
+# xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
+# xform.ClearXformOpOrder()
+# xform.AddTransformOp().Set(mat)
+
+# add the Robot into the physics scene
+world.scene.add(gripper)
+# reset the world (this calls initialize() + post_reset() for every prim in scene)
+# world.reset()
+
 
 effort_cmd = np.array([-0.0, -0.0], dtype=np.float32)
 close_action = ArticulationAction( joint_efforts = effort_cmd, joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
@@ -430,8 +481,8 @@ result, lidar = omni.kit.commands.execute(
             max_range=1.0,
             draw_points=True,
             draw_lines=True,
-            horizontal_fov=3.0,
-            vertical_fov=3.0,
+            horizontal_fov=15.0,
+            vertical_fov=15.0,
             horizontal_resolution=1,
             vertical_resolution=1,
             rotation_rate=0.0,
@@ -478,14 +529,16 @@ xform.AddScaleOp().Set(Gf.Vec3f(0.0, 0.0, 0.0))
 
 # Filter out any real contacts between this marker and your robot/CrackerBox.
 filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(marker_prim)
-filtered_pairs.CreateFilteredPairsRel().AddTarget("/panda")
+# filtered_pairs.CreateFilteredPairsRel().AddTarget("/panda")
+filtered_pairs.CreateFilteredPairsRel().AddTarget("/robotiq_gripper")
 filtered_pairs.CreateFilteredPairsRel().AddTarget("/World/CrackerBox")
 
 enable_extension("isaacsim.sensors.physx")
 simulation_app.update()
 
 # Get grasptarget prim and confirm the prim exists:
-grasptarget_path = "/panda/panda_hand"
+grasptarget_path = "/robotiq_gripper/base_link"
+# grasptarget_path = "/panda/panda_hand"
 grasptarget_prim = stage.GetPrimAtPath(grasptarget_path)
 if not grasptarget_prim or not grasptarget_prim.IsValid():
     raise RuntimeError(f"No valid prim at {grasptarget_path}")
@@ -548,28 +601,28 @@ while trial < max_trials:
     
     if reached_target:
         # stop moving gripper, perform shake action
-        gripper.apply_action(close_action)
+        # gripper.apply_action(close_action)
         world.step(render=True)
         world.step(render=True)
-        apply_swing_shake(gripper,  # or wherever your gripper prim is
-                  world=world,
-                  amplitude_rad=0.5,   # ~7° each side
-                  num_steps=300)   
+        # apply_swing_shake(gripper,  # or wherever your gripper prim is
+        #           world=world,
+        #           amplitude_rad=0.5,   # ~7° each side
+        #           num_steps=300)   
         reached_target = False
         target_point = reset_scene(stage, gripper, collision_object, centroid)
         # if object_in_gripper():
 
-    else:
-        move_gripper_toward(gripper, target_point)
+    # else:
+    #     move_gripper_toward(gripper, target_point)
     
     # depth = lidarInterface.get_linear_depth_data(lidarPath)
     # print("depth", depth)  
     
-    # if count > 1000:
-    #         target_point = reset_scene(stage, gripper, collision_object, centroid)
-    #         count = 0
-    #         trial += 1
-    #         print(f"Trial {trial} complete. Resetting scene.")
-    # count += 1
+    if count > 1000:
+            target_point = reset_scene(stage, gripper, collision_object, centroid)
+            count = 0
+            trial += 1
+            print(f"Trial {trial} complete. Resetting scene.")
+    count += 1
 # Close the simulator
 simulation_app.close()
