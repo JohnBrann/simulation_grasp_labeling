@@ -236,7 +236,7 @@ def reset_scene(stage, gripper, model, centroid):
     )
 
     world.reset()
-    gripper.initialize()
+    # gripper.initialize()
     world.step(render=False)
 
     # Sample point around object and look at point
@@ -370,7 +370,8 @@ world = World(stage_units_in_meters=1.0)
 stage = omni.usd.get_context().get_stage()
 
 # Define physics scene and set gravity
-scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/physicsScene"))
+# scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/World/PhysicsScene"))
+scene = UsdPhysics.Scene.Get(stage, Sdf.Path("/physicsScene"))
 scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
 scene.CreateGravityMagnitudeAttr().Set(0.0)
 
@@ -385,12 +386,12 @@ if not stage.GetPrimAtPath(dome_path):
     dome.CreateIntensityAttr(750.0)
     dome.CreateColorAttr((1.0, 1.0, 1.0))
 
-    # Create CrackerBox object
+# Create CrackerBox object
 create_prim(
     prim_path="/World/CrackerBox",
     prim_type="Xform",
-    # usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
-    usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
+    usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
     # usd_path="/home/csrobot/Isaac/assets/ycb/engine/engine.usd"
 )
 
@@ -441,6 +442,7 @@ gripper = Robot(
     position=[0.0, 0.5, 0.5],       # ← move the root 1 m up in world‐space
 )
 
+# FRANKA GRIPPER ROTATION
 # Create and apply full transform (rotation + translation)
 # rot = Gf.Rotation(Gf.Vec3d(0, 0, 1), 0.0)  # Rotate around Z axis
 # mat = Gf.Matrix4d().SetRotate(rot)
@@ -453,12 +455,91 @@ gripper = Robot(
 # add the Robot into the physics scene
 world.scene.add(gripper)
 # reset the world (this calls initialize() + post_reset() for every prim in scene)
-# world.reset()
+world.reset()
+world.step()
 
 
-effort_cmd = np.array([-0.0, -0.0], dtype=np.float32)
-close_action = ArticulationAction( joint_efforts = effort_cmd, joint_positions=np.array([0.0, 0.0])) # joint_indices=np.array()) 
-open_action = ArticulationAction(joint_positions=np.array([0.04, 0.04])) # joint_indices=np.array())
+
+# for finger_name in ["left_gripper","right_gripper"]:
+#     prim = stage.GetPrimAtPath(f"{prim_path}/{finger_name}")
+#     mat_api = UsdPhysics.MaterialAPI.Apply(prim)        # <— finger prim
+#     mat_api.CreateStaticFrictionAttr().Set(2.0)
+#     mat_api.CreateDynamicFrictionAttr().Set(1.5)
+#     mat_api.CreateRestitutionAttr().Set(0.0)
+
+
+
+#########
+
+dof_names     = gripper.dof_names
+print(f'dof_names {dof_names}')
+slider_idxs   = np.array([
+    dof_names.index("Slider_1"),
+    dof_names.index("Slider_2")
+])
+print("gripper joint indices:", slider_idxs)
+
+# after you've referenced the USD and before any world.reset()
+left_path  = Sdf.Path(f"{prim_path}/left_gripper")
+right_path = Sdf.Path(f"{prim_path}/right_gripper")
+
+left_prim  = stage.GetPrimAtPath(left_path)
+right_prim = stage.GetPrimAtPath(right_path)
+
+UsdPhysics.CollisionAPI.Apply(left_prim)
+UsdPhysics.CollisionAPI.Apply(right_prim)
+
+# on the left finger, filter out any contacts with the right finger
+pairs_api = UsdPhysics.FilteredPairsAPI.Apply(left_prim)
+rel       = pairs_api.CreateFilteredPairsRel()
+rel.AddTarget(right_prim.GetPath())
+
+# Set threshold for gripper positions to allow for full closure
+for dof in ["Slider_1","Slider_2"]:
+    pj = UsdPhysics.PrismaticJoint(stage.GetPrimAtPath(Sdf.Path(f"{prim_path}/{dof}")))
+    pj.GetLowerLimitAttr().Set(-0.025)  # double the stroke
+
+
+for dof in ["Slider_1","Slider_2"]:
+    jp    = stage.GetPrimAtPath(Sdf.Path(f"{prim_path}/{dof}"))
+    drive = UsdPhysics.DriveAPI.Apply(jp, "linear")
+    # switch to velocity drive
+    # drive.CreateTypeAttr().Set(UsdPhysics.Tokens.velocity)
+    # velocity drives only need damping (to avoid runaway)
+    drive.CreateStiffnessAttr(1000.0)             # N/m
+    drive.CreateDampingAttr(50.0)           
+    drive.CreateMaxForceAttr(10.0)         # max N·s/m
+
+    # ensure PhysX joint schema is present
+    PhysxSchema.PhysxJointAPI.Apply(jp)
+
+# close_positions = np.zeros(len(slider_idxs))           # [0.0, 0.0]
+# open_positions  = np.full(len(slider_idxs), 0.025)
+
+# close_vel = np.full(2, -0.03)
+# open_vel  = np.full(2,  0.03)
+
+# close_action = ArticulationAction(
+#     joint_velocities = close_vel,
+#     joint_indices    = slider_idxs
+# )
+# open_action = ArticulationAction(
+#     joint_velocities = open_vel,
+#     joint_indices    = slider_idxs
+# )
+
+# e.g. apply 20 N of closing force on each slider:
+efforts = np.full(len(slider_idxs), -0.005, dtype=np.float32)
+close_action = ArticulationAction(
+    joint_efforts = efforts,
+    joint_indices = slider_idxs
+)
+
+# and 20 N opening:
+open_action = ArticulationAction(
+    joint_efforts = np.full(len(slider_idxs), +0.01, dtype=np.float32),
+    joint_indices = slider_idxs
+)
 
 # Create Lidar cone
 cone = UsdGeom.Cone.Define(stage, "/World/lidar_cone")
@@ -472,7 +553,7 @@ xf_lidar_cone.SetRotate(Gf.Vec3f(-90.0, 0.0, 0.0))
 timeline = omni.timeline.get_timeline_interface()   
 lidarInterface = _range_sensor.acquire_lidar_sensor_interface() 
 
-omni.kit.commands.execute('AddPhysicsSceneCommand',stage = stage, path='/World/PhysicsScene')
+omni.kit.commands.execute('AddPhysicsSceneCommand',stage = stage, path='/physicsScene')
 result, lidar = omni.kit.commands.execute(
             "RangeSensorCreateLidar",
             path="/Lidar",
@@ -481,8 +562,8 @@ result, lidar = omni.kit.commands.execute(
             max_range=1.0,
             draw_points=True,
             draw_lines=True,
-            horizontal_fov=15.0,
-            vertical_fov=15.0,
+            horizontal_fov=3.0,
+            vertical_fov=3.0,
             horizontal_resolution=1,
             vertical_resolution=1,
             rotation_rate=0.0,
@@ -523,7 +604,7 @@ PhysxSchema.PhysxCollisionAPI.Apply(marker_prim)
 
 # Zero‐scale the sphere so its overlap box is exactly a point.
 xform = UsdGeom.Xformable(marker_prim)
-xform.ClearXformOpOrder()
+# xform.ClearXformOpOrder()
 # We already translated it inside visualize_point_sample(...), so now just zero‐scale:
 xform.AddScaleOp().Set(Gf.Vec3f(0.0, 0.0, 0.0))
 
@@ -555,9 +636,14 @@ if stage.GetPrimAtPath(offset_path):
 offset_xform = UsdGeom.Xform.Define(stage, offset_path)
 offset_prim = stage.GetPrimAtPath(offset_path)#
 
+# ROBOTIQ HAND-E GRIPPER
 offset_api   = UsdGeom.XformCommonAPI(offset_xform)
-offset_api.SetTranslate(Gf.Vec3d(0.0, 0.0, 0.066)) #0.11 is TCP
+offset_api.SetTranslate(Gf.Vec3d(0.0, 0.01, 0.0)) #0.11 is TCP
 offset_api.SetScale(Gf.Vec3f(1.0, 1.0, 1.0))
+
+# FRANKA PANDA GRIPPER
+# offset_api.SetTranslate(Gf.Vec3d(0.0, 0.0, 0.066)) #0.11 is TCP
+# offset_api.SetScale(Gf.Vec3f(1.0, 1.0, 1.0))
 
 UsdPhysics.CollisionAPI.Apply(offset_prim)
 PhysxSchema.PhysxCollisionAPI.Apply(offset_prim)
@@ -596,13 +682,25 @@ target_point = reset_scene(stage, gripper, collision_object, centroid)
 while trial < max_trials:
     world.step(render=True)
     # print(f'proximity distance: {proximity_distance}') 
-    reached_target = check_reached_target(proximity_distance, reach_threshold=0.001)
+    reached_target = check_reached_target(proximity_distance, reach_threshold=0.01)
     # move_gripper_toward(gripper, target_point)
-    
+    # if count <= 1000:
+    #     gripper.apply_action(open_action)
+    #     print('open')
+    # elif count > 1000 and count <= 2000:
+    #     print('close')
+    #     gripper.apply_action(close_action)
+    # elif count > 2000:
+    #     count = 0
+    # print(f'reachedtarget: {reached_target}')
     if reached_target:
         # stop moving gripper, perform shake action
-        # gripper.apply_action(close_action)
+        world.step(render=False)
         world.step(render=True)
+        for _ in range(200):
+            gripper.apply_action(close_action)
+            world.step(render=True)
+        # gripper.apply_action(close_action)
         world.step(render=True)
         # apply_swing_shake(gripper,  # or wherever your gripper prim is
         #           world=world,
@@ -611,18 +709,19 @@ while trial < max_trials:
         reached_target = False
         target_point = reset_scene(stage, gripper, collision_object, centroid)
         # if object_in_gripper():
-
-    # else:
-    #     move_gripper_toward(gripper, target_point)
+    else:
+        move_gripper_toward(gripper, target_point)
     
     # depth = lidarInterface.get_linear_depth_data(lidarPath)
     # print("depth", depth)  
     
-    if count > 1000:
-            target_point = reset_scene(stage, gripper, collision_object, centroid)
-            count = 0
-            trial += 1
-            print(f"Trial {trial} complete. Resetting scene.")
-    count += 1
+    # if count > 3000:
+    #     target_point = reset_scene(stage, gripper, collision_object, centroid)
+    # # if count > 1000:
+    # #         target_point = reset_scene(stage, gripper, collision_object, centroid)
+    # #         count = 0
+    # #         trial += 1
+    # #         print(f"Trial {trial} complete. Resetting scene.")
+    # count += 1
 # Close the simulator
 simulation_app.close()
