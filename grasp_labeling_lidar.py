@@ -13,7 +13,7 @@ from omni.isaac.core.utils.prims import create_prim
 from omni.isaac.core.prims import RigidPrim
 from isaacsim.asset.importer.urdf import _urdf
 from omni.isaac.core.utils.stage import add_reference_to_stage
-from pxr import UsdLux, Sdf, UsdPhysics, Gf, PhysicsSchemaTools, UsdGeom, Usd, UsdShade, PhysxSchema
+from pxr import UsdLux, Sdf, UsdPhysics, Gf, PhysicsSchemaTools, UsdGeom, Usd, UsdShade, PhysxSchema, Tf
 from isaacsim.core.utils.types import ArticulationAction
 from isaacsim.core.prims import SingleArticulation
 import omni.replicator.core as rep
@@ -33,6 +33,7 @@ from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.prims import get_prim_at_path
 from isaacsim.sensors.physx import ProximitySensor, register_sensor, clear_sensors
 from isaacsim.core.api.robots import Robot
+from omni.physx.scripts.utils import setCollider
 # from isaacsim.core.api.action import ArticulationAction
 import os
 
@@ -76,6 +77,13 @@ def position_lidar(point: np.ndarray, radius=0.5):
     x = r_xy * np.cos(phi)
     y = r_xy * np.sin(phi)
     return centroid + np.array([x, y, z*radius], dtype=float)
+
+def calculate_approach_pose(point: np.ndarray, normal: np.ndarray, standoff: float = 0.5):
+    # position a bit out along the normal
+    n = normal / np.linalg.norm(normal)
+    pos = point + n * standoff
+    return Gf.Vec3d(*pos.tolist())
+
 
 def look_at_point(cone_path: str, target_pos: np.ndarray, point: np.ndarray):
     stage = omni.usd.get_context().get_stage()
@@ -127,6 +135,7 @@ def move_gripper_to_lidar(gripper: SingleArticulation,
 
     angle_range = 90
     noise_angle = random.choice(range(-angle_range, angle_range, 10))
+    noise_angle = 0
 
     # FOR HAND-E gripper
     wrist_offset = Gf.Rotation(Gf.Vec3d(0,0,1), noise_angle).GetQuat()
@@ -165,7 +174,7 @@ def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size
     gripper.set_world_pose(position=new_pos)
     # return False
 
-def check_reached_target(proximity_distance, reach_threshold= 0.001):
+def check_reached_target(proximity_distance, reach_threshold= 0.015):
     if proximity_distance == None:
         return False
     elif proximity_distance < reach_threshold:
@@ -236,18 +245,13 @@ def reset_scene(stage, gripper, model, centroid):
     )
 
     world.reset()
-    # gripper.initialize()
-    world.step(render=False)
-
+    
     # Sample point around object and look at point
-    view_pos = position_lidar(centroid, 0.4)
-    # print(f'view pos: {view_pos}')
-    # view_pos = np.array([-0.04163335, -0.05821681, 0.81332028])
+    # view_pos = position_lidar(centroid, 0.4)
 
     # Sample single point and lidar pose
-    sampled_point = sample_single_mesh_point("/World/CrackerBox")
-    # print(f"sampled point {sampled_point}")
-    # sampled_point = np.array([-0.04691, -0.081479, 1.17597795])
+    sampled_point, normal = sample_point_and_normal("/World/object")
+    view_pos = calculate_approach_pose(sampled_point, normal, standoff = 0.1)
 
     visualize_point_sample(sampled_point, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0))
     look_at_point("/World/lidar_cone", target_pos=view_pos, point=sampled_point)
@@ -256,6 +260,7 @@ def reset_scene(stage, gripper, model, centroid):
     
     # open the gripper
     gripper.apply_action(open_action)
+    world.step(render=False)
 
     return sampled_point
 
@@ -288,25 +293,88 @@ def get_mesh_points(xform_path: str):
     # print(f'Verts {verts.shape}')
     return verts
 
-def sample_single_mesh_point(xform_path: str):
-    # get all points, make this more effficient?
-    points = get_mesh_points(xform_path)
+# def sample_single_mesh_point(xform_path: str):
+#     # get all points, make this more effficient?
+#     points = get_mesh_points(xform_path)
 
-    if points.size == 0:
-        raise ValueError(f"No points found under {xform_path}")
-    # pick a random index
-    idx = random.randrange(points.shape[0])
-    local_pt = points[idx]  # [x, y, z] in mesh-local frame
+#     if points.size == 0:
+#         raise ValueError(f"No points found under {xform_path}")
+#     # pick a random index
+#     idx = random.randrange(points.shape[0])
+#     local_pt = points[idx]  # [x, y, z] in mesh-local frame
 
-    #  Transform into world space
+#     #  Transform into world space
+#     stage = omni.usd.get_context().get_stage()
+#     xform_cache = UsdGeom.XformCache()
+#     prim = stage.GetPrimAtPath(xform_path)
+#     world_mat = xform_cache.GetLocalToWorldTransform(prim)
+#     world_vec = world_mat.Transform(Gf.Vec3d(*local_pt))
+#     point = np.array([world_vec[0], world_vec[1], world_vec[2]], dtype=float) 
+
+#     return point
+
+# Sample a random point on 
+def sample_point_and_normal(xform_path: str):
     stage = omni.usd.get_context().get_stage()
-    xform_cache = UsdGeom.XformCache()
-    prim = stage.GetPrimAtPath(xform_path)
-    world_mat = xform_cache.GetLocalToWorldTransform(prim)
-    world_vec = world_mat.Transform(Gf.Vec3d(*local_pt))
-    point = np.array([world_vec[0], world_vec[1], world_vec[2]], dtype=float) 
 
-    return point
+    # find the Mesh prim of the desired object
+    root = stage.GetPrimAtPath(xform_path)
+    mesh_prim = None
+    for prim in Usd.PrimRange(root):
+        if prim.IsA(UsdGeom.Mesh):
+            mesh_prim = prim
+            break
+    if mesh_prim is None:
+        raise RuntimeError(f"No Mesh found under {xform_path}")
+
+    mesh = UsdGeom.Mesh(mesh_prim)
+
+    # get points and indices
+    verts_attr = mesh.GetPointsAttr().Get()
+    idxs_attr  = mesh.GetFaceVertexIndicesAttr().Get()
+    if verts_attr is None or idxs_attr is None:
+        raise RuntimeError(f"Mesh at {mesh_prim.GetPath()} has no points or indices")
+
+    # converts points to npy, assuming all faces are triangles
+    verts = np.array([[p[0], p[1], p[2]] for p in verts_attr])
+    tris  = np.array(idxs_attr, dtype=int).reshape(-1, 3)
+
+    # compute triangles areas and sampling probabilities
+    v0 = verts[tris[:,0]]; v1 = verts[tris[:,1]]; v2 = verts[tris[:,2]]
+    areas = 0.5 * np.linalg.norm(np.cross(v1-v0, v2-v0), axis=1)
+    probs = areas / areas.sum()
+
+    # pick one triangle and a random barycentric point (get point on mesh)
+    ti = np.random.choice(len(probs), p=probs)
+    a, b, c = tris[ti]
+    u, v = np.random.rand(), np.random.rand()
+    if u+v > 1.0:
+        u, v = 1-u, 1-v
+    w = 1 - u - v
+    local_pt = w*verts[a] + u*verts[b] + v*verts[c]
+
+    # compute the face normal of selected triangle
+    local_n = np.cross(verts[b]-verts[a], verts[c]-verts[a])
+    local_n /= np.linalg.norm(local_n)
+
+    # transform to world, get the point in respect to the world
+    #   so we know where to put the visual markers
+    xform_cache = UsdGeom.XformCache()
+    mat = xform_cache.GetLocalToWorldTransform(mesh_prim)
+    rot3d = mat.ExtractRotationMatrix()
+
+    # world-space point (uses full 4×4)
+    wp = mat.Transform(Gf.Vec3d(*local_pt))
+
+    # world-space normal (rotate only via 3×3)
+    rn_gf = rot3d * Gf.Vec3d(*local_n)
+    
+    # convert to npy and normalize
+    world_pt = np.array([wp[i] for i in range(3)])
+    world_n  = np.array([rn_gf[i] for i in range(3)])
+    world_n /= np.linalg.norm(world_n)
+
+    return world_pt, world_n
 
 # TODO:function to see if the gripper grasp target area has made contact with the object
 def grasp_threshold_reached():
@@ -364,13 +432,11 @@ def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation
     world.scene.add(robot)
     return robot
 
-#### SETUP WORLD ####
-# Initialize simulation world
+# ─────────────────── SETUP WORLD & SCENE ─────────────────────────────────────
 world = World(stage_units_in_meters=1.0)
 stage = omni.usd.get_context().get_stage()
 
-# Define physics scene and set gravity
-# scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/World/PhysicsScene"))
+# Physics scene & zero gravity
 scene = UsdPhysics.Scene.Get(stage, Sdf.Path("/physicsScene"))
 scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
 scene.CreateGravityMagnitudeAttr().Set(0.0)
@@ -379,68 +445,69 @@ scene.CreateGravityMagnitudeAttr().Set(0.0)
 PhysicsSchemaTools.addGroundPlane(stage, "/World/groundPlane", "Z", 15,
                                 Gf.Vec3f(0,0,0), Gf.Vec3f(0.7))
 
-# Add a dome light because isaac starts fully dark for some reason?
+# Dome light
 dome_path = Sdf.Path("/World/DomeLight")
 if not stage.GetPrimAtPath(dome_path):
     dome = UsdLux.DomeLight.Define(stage, dome_path)
     dome.CreateIntensityAttr(750.0)
     dome.CreateColorAttr((1.0, 1.0, 1.0))
 
-# Create CrackerBox object
+# ─────────────────── CRACKER BOX ─────────────────────────────────────────────
 create_prim(
-    prim_path="/World/CrackerBox",
+    prim_path="/World/object",
     prim_type="Xform",
-    usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
-    # usd_path="/home/csrobot/Isaac/assets/ycb/003_cracker_box/textured.usd"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
+    # usd_path="/home/csrobot/Isaac/assets/ycb/mustard/006_mustard_bottle.usd"
     # usd_path="/home/csrobot/Isaac/assets/ycb/engine/engine.usd"
+    usd_path="/home/csrobot/Isaac/assets/ycb/009_gelatin_box.usd"
 )
-
-# Wrap it in RigidPrim so the item is affected by gravity
-collision_object = RigidPrim(
-    prim_path=f"/World/CrackerBox",
+object = RigidPrim(
+    prim_path="/World/object",
     name="cracker_collision",
     position=[0.0, 0.0, 1.0],
     orientation=[1.0, 0.0, 0.0, 0.0],
-    # orientation=[1.0, 0.0, 0.0, 0.0],
-    scale=[1, 1, 1],
+    scale=[1.0, 1.0, 1.0],
 )
-
-# Enable collision on the box by using the collision api
-collision_api = UsdPhysics.CollisionAPI.Apply(collision_object.prim)
-# # use the raw triangle mesh for collision (and LiDAR raycasts)
-# collision_api.GetCollisionApproximationAttr().Set("none")
-
-# mesh_api = UsdPhysics.MeshCollisionAPI.Apply(collision_object.prim)
-
-# # 4) Tell PhysX “none” → use raw triangles instead of convex hull
-# approx_attr = mesh_api.CreateApproximationAttr()
-# approx_attr.Set("none")
+UsdPhysics.CollisionAPI.Apply(object.prim)
+world.scene.add(object)
 
 
-# Add box to the simulation scene
-world.scene.add(collision_object)
-
-###### ADD GRIPPER #######
+# ─────────────────── GRIPPER ────────────────────────────────────────
 # gripper = import_urdf_model(
 #     "/home/csrobot/Isaac/assets/grippers/franka_panda/franka_panda.urdf",
 #     position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
 
-
 # Reference the standalone Robotiq Hand-E USD
 assets_dir = "/home/csrobot/Isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
 usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_base.usd")
-prim_path = "/robotiq_gripper"
+gripper_prim_path = "/robotiq_gripper"
 add_reference_to_stage(
     usd_path=usd_path,
-    prim_path=prim_path
+    prim_path=gripper_prim_path
 )
+
+# Change collision approximation to SDF, Convex Approximation might work also -> might be faster
+right_gripper_collision_prim = stage.GetPrimAtPath(
+    "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02"
+)
+setCollider(right_gripper_collision_prim, "sdf")
+
+left_gripper_collision_prim = stage.GetPrimAtPath(
+    "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02"
+)
+setCollider(left_gripper_collision_prim, "sdf")
+
 
 # wrap the prim as a robot (articulation)
 gripper = Robot(
-    prim_path=prim_path,
+    prim_path=gripper_prim_path,
     name="Hand-E",
-    position=[0.0, 0.5, 0.5],       # ← move the root 1 m up in world‐space
+    position=[0.0, 0.5, 0.5],       
 )
+
+# prim = stage.GetPrimAtPath(gripper_prim_path)
+# rb = UsdPhysics.RigidBodyAPI.Apply(prim)
+# rb.GetKinematicEnabledAttr().Set(True)
 
 # FRANKA GRIPPER ROTATION
 # Create and apply full transform (rotation + translation)
@@ -451,26 +518,67 @@ gripper = Robot(
 # xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
 # xform.ClearXformOpOrder()
 # xform.AddTransformOp().Set(mat)
+#####################
 
 # add the Robot into the physics scene
 world.scene.add(gripper)
-# reset the world (this calls initialize() + post_reset() for every prim in scene)
+
+
+# ─────────────────── RUBBER PAD MATERIAL ────────────────────────────────────
+mat_path   = Sdf.Path("/World/Materials/RubberPad")
+rubber_mat = UsdShade.Material.Define(stage, mat_path)
+
+# Preview Surface shader
+shader_path = mat_path.AppendChild("PreviewShader")
+shader = UsdShade.Shader.Define(stage, shader_path)
+shader.CreateIdAttr("UsdPreviewSurface")
+shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0, 0.0, 0.0))
+shader.CreateInput("metallic",      Sdf.ValueTypeNames.Float).Set(0.0)
+shader.CreateInput("roughness",     Sdf.ValueTypeNames.Float).Set(0.8)
+
+# Connect shader → material
+surface_output = shader.GetOutput("surface")
+mat_output     = rubber_mat.CreateSurfaceOutput()
+mat_output.ConnectToSource(surface_output)
+
+# Physics: high friction, max‐combine
+phys_api = UsdPhysics.MaterialAPI.Apply(rubber_mat.GetPrim())
+phys_api.CreateStaticFrictionAttr(0.8)
+phys_api.CreateDynamicFrictionAttr(0.8)
+phys_api.CreateRestitutionAttr(0.0)
+physx_api = PhysxSchema.PhysxMaterialAPI.Apply(rubber_mat.GetPrim())
+physx_api.CreateFrictionCombineModeAttr().Set("max")
+
+
+# Create Gripper Pads and attach to gripper
+left_gripper_pad = UsdGeom.Cube.Define(stage, "/robotiq_gripper/left_gripper/left_gripper_pad")
+xformLeftApi = UsdGeom.XformCommonAPI(left_gripper_pad)
+xformLeftApi.SetScale    (Gf.Vec3f(0.01, 0.01, 0.0007))
+xformLeftApi.SetTranslate(Gf.Vec3d(0.0, 0.05, -0.025))
+
+right_gripper_pad = UsdGeom.Cube.Define(stage, "/robotiq_gripper/right_gripper/right_gripper_pad")
+xformRightApi = UsdGeom.XformCommonAPI(right_gripper_pad)
+xformRightApi.SetScale    (Gf.Vec3f(0.01, 0.01, 0.0007))
+xformRightApi.SetTranslate(Gf.Vec3d(0.0, 0.05, 0.025))
+
+# Bind material to griper pads
+for finger in ["left_gripper", "right_gripper"]:
+    fp = f"{gripper_prim_path}/{finger}/{finger}_pad"
+    prim = stage.GetPrimAtPath(fp)
+    if prim and prim.IsValid():
+        UsdShade.MaterialBindingAPI(prim).Bind(
+            rubber_mat, UsdShade.Tokens.strongerThanDescendants
+        )
+        UsdPhysics.CollisionAPI.Apply(prim)
+        PhysxSchema.PhysxCollisionAPI.Apply(prim)
+    else:
+        print(f"⚠️ Could not bind rubber pad to {fp!r}")
+
 world.reset()
-world.step()
+world.step(render=False)
 
-
-
-# for finger_name in ["left_gripper","right_gripper"]:
-#     prim = stage.GetPrimAtPath(f"{prim_path}/{finger_name}")
-#     mat_api = UsdPhysics.MaterialAPI.Apply(prim)        # <— finger prim
-#     mat_api.CreateStaticFrictionAttr().Set(2.0)
-#     mat_api.CreateDynamicFrictionAttr().Set(1.5)
-#     mat_api.CreateRestitutionAttr().Set(0.0)
-
-
-
-#########
-
+# ─────────────────── JOINTS & DRIVES ────────────────────────────────────────
 dof_names     = gripper.dof_names
 print(f'dof_names {dof_names}')
 slider_idxs   = np.array([
@@ -480,14 +588,11 @@ slider_idxs   = np.array([
 print("gripper joint indices:", slider_idxs)
 
 # after you've referenced the USD and before any world.reset()
-left_path  = Sdf.Path(f"{prim_path}/left_gripper")
-right_path = Sdf.Path(f"{prim_path}/right_gripper")
+left_path  = Sdf.Path(f"{gripper_prim_path}/left_gripper")
+right_path = Sdf.Path(f"{gripper_prim_path}/right_gripper")
 
 left_prim  = stage.GetPrimAtPath(left_path)
 right_prim = stage.GetPrimAtPath(right_path)
-
-UsdPhysics.CollisionAPI.Apply(left_prim)
-UsdPhysics.CollisionAPI.Apply(right_prim)
 
 # on the left finger, filter out any contacts with the right finger
 pairs_api = UsdPhysics.FilteredPairsAPI.Apply(left_prim)
@@ -496,52 +601,30 @@ rel.AddTarget(right_prim.GetPath())
 
 # Set threshold for gripper positions to allow for full closure
 for dof in ["Slider_1","Slider_2"]:
-    pj = UsdPhysics.PrismaticJoint(stage.GetPrimAtPath(Sdf.Path(f"{prim_path}/{dof}")))
+    pj = UsdPhysics.PrismaticJoint(stage.GetPrimAtPath(Sdf.Path(f"{gripper_prim_path}/{dof}")))
     pj.GetLowerLimitAttr().Set(-0.025)  # double the stroke
 
 
 for dof in ["Slider_1","Slider_2"]:
-    jp    = stage.GetPrimAtPath(Sdf.Path(f"{prim_path}/{dof}"))
+    jp    = stage.GetPrimAtPath(Sdf.Path(f"{gripper_prim_path}/{dof}"))
     drive = UsdPhysics.DriveAPI.Apply(jp, "linear")
-    # switch to velocity drive
-    # drive.CreateTypeAttr().Set(UsdPhysics.Tokens.velocity)
-    # velocity drives only need damping (to avoid runaway)
     drive.CreateStiffnessAttr(1000.0)             # N/m
     drive.CreateDampingAttr(50.0)           
-    drive.CreateMaxForceAttr(10.0)         # max N·s/m
-
-    # ensure PhysX joint schema is present
+    drive.CreateMaxForceAttr(70.0)         # max N·s/m
     PhysxSchema.PhysxJointAPI.Apply(jp)
 
-# close_positions = np.zeros(len(slider_idxs))           # [0.0, 0.0]
-# open_positions  = np.full(len(slider_idxs), 0.025)
-
-# close_vel = np.full(2, -0.03)
-# open_vel  = np.full(2,  0.03)
-
-# close_action = ArticulationAction(
-#     joint_velocities = close_vel,
-#     joint_indices    = slider_idxs
-# )
-# open_action = ArticulationAction(
-#     joint_velocities = open_vel,
-#     joint_indices    = slider_idxs
-# )
-
-# e.g. apply 20 N of closing force on each slider:
 efforts = np.full(len(slider_idxs), -0.005, dtype=np.float32)
 close_action = ArticulationAction(
     joint_efforts = efforts,
     joint_indices = slider_idxs
 )
 
-# and 20 N opening:
 open_action = ArticulationAction(
     joint_efforts = np.full(len(slider_idxs), +0.01, dtype=np.float32),
     joint_indices = slider_idxs
 )
 
-# Create Lidar cone
+# ─────────────────── LIDAR SENSOR ───────────────────────────────────────────
 cone = UsdGeom.Cone.Define(stage, "/World/lidar_cone")
 cone.GetHeightAttr().Set(0.1)
 cone.GetRadiusAttr().Set(0.02)
@@ -588,7 +671,7 @@ mat.SetRotate(rot)
 xf_lidar.AddTransformOp().Set(mat)
 
 # Calculate centroid of object
-centroid = calculate_centroid("/World/CrackerBox")
+centroid = calculate_centroid("/World/object")
 print(f"Centroid: {centroid}")
 visualize_point_sample(centroid, stage, sphere_radius=0.005, color=(0,255,0))
 
@@ -602,28 +685,23 @@ if not marker_prim or not marker_prim.IsValid():
 UsdPhysics.CollisionAPI.Apply(marker_prim)       
 PhysxSchema.PhysxCollisionAPI.Apply(marker_prim) 
 
-# Zero‐scale the sphere so its overlap box is exactly a point.
 xform = UsdGeom.Xformable(marker_prim)
-# xform.ClearXformOpOrder()
-# We already translated it inside visualize_point_sample(...), so now just zero‐scale:
 xform.AddScaleOp().Set(Gf.Vec3f(0.0, 0.0, 0.0))
 
-# Filter out any real contacts between this marker and your robot/CrackerBox.
+# Filter out any real contacts between this marker and your robot/object.
 filtered_pairs = UsdPhysics.FilteredPairsAPI.Apply(marker_prim)
 # filtered_pairs.CreateFilteredPairsRel().AddTarget("/panda")
 filtered_pairs.CreateFilteredPairsRel().AddTarget("/robotiq_gripper")
-filtered_pairs.CreateFilteredPairsRel().AddTarget("/World/CrackerBox")
+filtered_pairs.CreateFilteredPairsRel().AddTarget("/World/object")
 
 enable_extension("isaacsim.sensors.physx")
 simulation_app.update()
 
-# Get grasptarget prim and confirm the prim exists:
 grasptarget_path = "/robotiq_gripper/base_link"
 # grasptarget_path = "/panda/panda_hand"
 grasptarget_prim = stage.GetPrimAtPath(grasptarget_path)
 if not grasptarget_prim or not grasptarget_prim.IsValid():
     raise RuntimeError(f"No valid prim at {grasptarget_path}")
-
 
 # apply collision API's to gripper
 UsdPhysics.CollisionAPI.Apply(grasptarget_prim)
@@ -669,6 +747,12 @@ def print_proximity_data(_):
 world.add_physics_callback("print_sensor", print_proximity_data)
 simulation_app.update()
 simulation_app.update()
+
+# ─────────────────── INITIALIZE SIMULATION ──────────────────────────────────
+world.reset()
+world.step()
+
+
 world.play()
 
 # Trials!!!!
@@ -677,51 +761,36 @@ max_trials = 100
 count = 0
 reached_target = False
 
-target_point = reset_scene(stage, gripper, collision_object, centroid)
+target_point = reset_scene(stage, gripper, object, centroid)
 
 while trial < max_trials:
     world.step(render=True)
     # print(f'proximity distance: {proximity_distance}') 
     reached_target = check_reached_target(proximity_distance, reach_threshold=0.01)
-    # move_gripper_toward(gripper, target_point)
-    # if count <= 1000:
-    #     gripper.apply_action(open_action)
-    #     print('open')
-    # elif count > 1000 and count <= 2000:
-    #     print('close')
-    #     gripper.apply_action(close_action)
-    # elif count > 2000:
-    #     count = 0
-    # print(f'reachedtarget: {reached_target}')
+   
     if reached_target:
-        # stop moving gripper, perform shake action
-        world.step(render=False)
+        print('reached target')
+        # world.step(render=False)
         world.step(render=True)
         for _ in range(200):
             gripper.apply_action(close_action)
             world.step(render=True)
-        # gripper.apply_action(close_action)
-        world.step(render=True)
-        # apply_swing_shake(gripper,  # or wherever your gripper prim is
-        #           world=world,
-        #           amplitude_rad=0.5,   # ~7° each side
-        #           num_steps=300)   
-        reached_target = False
-        target_point = reset_scene(stage, gripper, collision_object, centroid)
+
+        target_point = reset_scene(stage, gripper, object, centroid)
         # if object_in_gripper():
+        reached_target = False
+        count = 0
+        print('end reached target')
     else:
         move_gripper_toward(gripper, target_point)
     
     # depth = lidarInterface.get_linear_depth_data(lidarPath)
     # print("depth", depth)  
     
-    # if count > 3000:
-    #     target_point = reset_scene(stage, gripper, collision_object, centroid)
-    # # if count > 1000:
-    # #         target_point = reset_scene(stage, gripper, collision_object, centroid)
-    # #         count = 0
-    # #         trial += 1
-    # #         print(f"Trial {trial} complete. Resetting scene.")
-    # count += 1
+    if count > 2000:
+        target_point = reset_scene(stage, gripper, object, centroid)
+        count = 0
+    count += 1
 # Close the simulator
 simulation_app.close()
+
