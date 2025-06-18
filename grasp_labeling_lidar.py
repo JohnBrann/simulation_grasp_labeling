@@ -162,7 +162,7 @@ def move_gripper_to_lidar(gripper: SingleArticulation,
     )
 
 #TODO: Use rays and contact points and distance from center of gripper to know when reach object and should grasp
-def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.0005):
+def move_gripper_toward(gripper: SingleArticulation, target: Gf.Vec3d, step_size=0.0001):
     current_pos, _ = gripper.get_world_pose()
     direction = np.array([target[0], target[1], target[2]]) - np.array(current_pos)
     distance = np.linalg.norm(direction)
@@ -452,7 +452,7 @@ if not stage.GetPrimAtPath(dome_path):
     dome.CreateIntensityAttr(750.0)
     dome.CreateColorAttr((1.0, 1.0, 1.0))
 
-# ─────────────────── CRACKER BOX ─────────────────────────────────────────────
+# ─────────────────── OBJECT ─────────────────────────────────────────────
 create_prim(
     prim_path="/World/object",
     prim_type="Xform",
@@ -479,23 +479,97 @@ world.scene.add(object)
 
 # Reference the standalone Robotiq Hand-E USD
 assets_dir = "/home/csrobot/Isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
-usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_base.usd")
+usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_convexDecomp_flattened.usd")
 gripper_prim_path = "/robotiq_gripper"
 add_reference_to_stage(
     usd_path=usd_path,
     prim_path=gripper_prim_path
 )
 
-# Change collision approximation to SDF, Convex Approximation might work also -> might be faster
-right_gripper_collision_prim = stage.GetPrimAtPath(
-    "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02"
-)
-setCollider(right_gripper_collision_prim, "sdf")
 
-left_gripper_collision_prim = stage.GetPrimAtPath(
-    "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02"
-)
-setCollider(left_gripper_collision_prim, "sdf")
+
+# finger_paths = [
+#     "/robotiq_gripper/base_link",
+#     "/robotiq_gripper/right_gripper",
+#     "/robotiq_gripper/left_gripper",
+#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_01",
+#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02",
+#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_01",
+#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02",
+#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_11ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_6ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_13ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_01",
+#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_10ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_24ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_02",
+#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_12ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_03",
+#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_7ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_25ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_04",
+#     "/robotiq_gripper/base_link/Group2ROBOTIQ_HAND_E_DEFEATURE",
+#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_05",
+#     "/robotiq_gripper/base_link/Group1ROBOTIQ_HAND_E_DEFEATURE",
+# ]
+
+# # def disable_root_collision(path):
+# #     prim = stage.GetPrimAtPath(path)
+# #     if not prim or not prim.IsValid():
+# #         return
+# #     # turn off the default Xform‐level collider
+# #     api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath()) or UsdPhysics.CollisionAPI.Apply(prim)
+# #     api.GetCollisionEnabledAttr().Set(False)
+
+# # def configure_mesh(prim):
+# #     # 1) USD collision schema
+# #     UsdPhysics.CollisionAPI.Apply(prim)
+# #     # 2) PhysX collision schema
+# #     physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+# #     # 3) swap to convex‐decomposition (legal on dynamics)
+# #     setCollider(prim, "convexDecomposition")
+# #     # 4) tighten margins: 1 mm skin, 0 mm rest
+# #     physx_api.GetContactOffsetAttr().Set(1e-3)
+# #     physx_api.GetRestOffsetAttr() .Set(0.0)
+
+# # # --- A) disable the “ghost” colliders on the two root Xforms ---
+# # disable_root_collision("/World/object")
+# # disable_root_collision("/robotiq_gripper/base_link")
+
+# # # --- B) walk only the actual mesh prims under both hierarchies ---
+# # for root_path in ("/World/object", "/robotiq_gripper"):
+# #     root = stage.GetPrimAtPath(root_path)
+# #     if not root:
+# #         continue
+# #     for prim in Usd.PrimRange(root):
+# #         if prim.IsA(UsdGeom.Mesh):
+# #             configure_mesh(prim)
+
+
+
+
+
+# for path in finger_paths:
+#     prim = stage.GetPrimAtPath(path)
+#     if not prim or not prim.IsValid():
+#         print(f"⚠️ could not find prim at {path}")
+#         continue
+
+#     # 1) USD Collision API  
+#     UsdPhysics.CollisionAPI.Apply(prim)
+
+#     # 2) PhysX Collision API (returns the API object, so we can use it immediately)
+#     physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+
+#     # 3) switch to SDF (or "convexDecomposition")
+#     setCollider(prim, "convexDecomposition")
+
+#     # 4) zero out the padding on *this* API object
+#     physx_api.GetContactOffsetAttr().Set(0.001)
+#     physx_api.GetRestOffsetAttr() .Set(0.0)
 
 
 # wrap the prim as a robot (articulation)
@@ -562,7 +636,7 @@ xformRightApi = UsdGeom.XformCommonAPI(right_gripper_pad)
 xformRightApi.SetScale    (Gf.Vec3f(0.01, 0.01, 0.0007))
 xformRightApi.SetTranslate(Gf.Vec3d(0.0, 0.05, 0.025))
 
-# Bind material to griper pads
+# Bind material to gripper pads
 for finger in ["left_gripper", "right_gripper"]:
     fp = f"{gripper_prim_path}/{finger}/{finger}_pad"
     prim = stage.GetPrimAtPath(fp)
@@ -611,6 +685,7 @@ for dof in ["Slider_1","Slider_2"]:
     drive.CreateStiffnessAttr(1000.0)             # N/m
     drive.CreateDampingAttr(50.0)           
     drive.CreateMaxForceAttr(70.0)         # max N·s/m
+    drive.CreateTargetVelocityAttr(0.001) 
     PhysxSchema.PhysxJointAPI.Apply(jp)
 
 efforts = np.full(len(slider_idxs), -0.005, dtype=np.float32)
@@ -748,6 +823,35 @@ world.add_physics_callback("print_sensor", print_proximity_data)
 simulation_app.update()
 simulation_app.update()
 
+# ─────────────────── CONTACT SENSOR ──────────────────────────────────
+# left_pad_path  = "/robotiq_gripper/left_gripper/left_gripper_pad"
+# right_pad_path = "/robotiq_gripper/right_gripper/right_gripper_pad"
+
+# # 4) Create & configure the ContactSensor wrappers
+# left_sensor = ContactSensor(
+#     prim_path=f"{left_pad_path}/Contact_Sensor",
+#     name="LeftPadSensor",
+#     frequency=120,                   # sample at 120 Hz (every physics step)
+#     translation=np.array([0.0, 0.0, 0.0]),
+#     min_threshold=0.0,               # report all contacts ≥ 0 N·s
+#     max_threshold=1e7,               # clamp impulses up to 10 000 000 N·s
+#     radius=-1                        # use the pad’s full collision bounds
+# )
+# right_sensor = ContactSensor(
+#     prim_path=f"{right_pad_path}/Contact_Sensor",
+#     name="RightPadSensor",
+#     frequency=120,
+#     translation=np.array([0.0, 0.0, 0.0]),
+#     min_threshold=0.0,
+#     max_threshold=1e7,
+#     radius=-1
+# )
+
+# # 5) Register sensors with the world
+# world.scene.add_sensor(left_sensor)
+# world.scene.add_sensor(right_sensor)
+
+
 # ─────────────────── INITIALIZE SIMULATION ──────────────────────────────────
 world.reset()
 world.step()
@@ -767,13 +871,22 @@ while trial < max_trials:
     world.step(render=True)
     # print(f'proximity distance: {proximity_distance}') 
     reached_target = check_reached_target(proximity_distance, reach_threshold=0.01)
+    
    
     if reached_target:
         print('reached target')
         # world.step(render=False)
         world.step(render=True)
-        for _ in range(200):
+        for _ in range(400):
             gripper.apply_action(close_action)
+            # left_contacts  = left_contact_sensor.get_contacts()  # list of Contact objects
+            # right_contacts = right_contact_sensor.get_contacts()
+
+            # if left_contacts:
+            #     print(f"Left pad contacts:", left_contacts)
+            # if right_contacts:
+            #     print(f"Right pad contacts:", right_contacts)
+
             world.step(render=True)
 
         target_point = reset_scene(stage, gripper, object, centroid)
