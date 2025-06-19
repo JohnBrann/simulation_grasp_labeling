@@ -84,7 +84,6 @@ def calculate_approach_pose(point: np.ndarray, normal: np.ndarray, standoff: flo
     pos = point + n * standoff
     return Gf.Vec3d(*pos.tolist())
 
-
 def look_at_point(cone_path: str, target_pos: np.ndarray, point: np.ndarray):
     stage = omni.usd.get_context().get_stage()
     
@@ -232,6 +231,33 @@ def apply_swing_shake(gripper: SingleArticulation, world: World,
     ]
     gripper.set_world_pose(position=pivot_pos, orientation=restore_quat)
     world.step(render=True)
+
+def move_gripper_upward(
+    gripper,        # your SingleArticulation / Robot
+    world,          # your omni.isaac.core.World
+    speed=0.1,      # meters per second
+    duration=2.0,   # total seconds to move
+    render=True     # whether to render each step
+):
+    """
+    Moves the gripper straight upward at `speed` m/s for `duration` seconds.
+    """
+    # estimate timestep (secs) per world.step()
+    # Isaac Sim default physics dt is 1/60, but you can also query:
+    # dt = world.physics_context.get_physics_dt()
+    dt = 1.0 / 60.0
+
+    steps = int(duration / dt)
+    steps = 500
+    for _ in range(steps):
+        # 1) get current pose
+        pos, ori = gripper.get_world_pose()      # pos is a list [x,y,z]
+        # 2) increment Z
+        pos[2] += speed * dt
+        # 3) teleport gripper
+        gripper.set_world_pose(position=pos, orientation=ori)
+        # 4) advance sim
+        world.step(render=render)
 
 # TODO: check whether the fingers are in contact with the mesh after shaking
 def check_finger_contact():
@@ -502,7 +528,10 @@ for link in links:
         raise RuntimeError(f"Link prim not found: {prim_path!r}")
     physxAPI = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
     physxAPI.CreateDisableGravityAttr(True)
-   
+
+    # Give the gripper a ton of mass so it does not rotate when trying to pick something
+    mass_api = UsdPhysics.MassAPI.Apply(prim)
+    mass_api.GetMassAttr().Set(100000.0)  
 
 # prim = stage.GetPrimAtPath(gripper_prim_path)
 # rb = UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -813,6 +842,11 @@ while trial < max_trials:
             #     print(f"Right pad contacts:", right_contacts)
 
             world.step(render=True)
+
+        # TODO: check if object is in the gripper
+        # lift object upward
+        move_gripper_upward(gripper, world, speed=0.01, duration=3.0)
+        # TODO: apply a shake test
 
         target_point = reset_scene(stage, gripper, object, centroid)
         # if object_in_gripper():
