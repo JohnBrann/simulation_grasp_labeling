@@ -459,12 +459,12 @@ create_prim(
     # usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
     # usd_path="/home/csrobot/Isaac/assets/ycb/mustard/006_mustard_bottle.usd"
     # usd_path="/home/csrobot/Isaac/assets/ycb/engine/engine.usd"
-    usd_path="/home/csrobot/Isaac/assets/ycb/009_gelatin_box.usd"
+    usd_path="/home/johnrobot/isaac/assets/ycb/004_sugar_box.usd"
 )
 object = RigidPrim(
     prim_path="/World/object",
     name="cracker_collision",
-    position=[0.0, 0.0, 1.0],
+    position=[0.0, 0.0, 0.5],
     orientation=[1.0, 0.0, 0.0, 0.0],
     scale=[1.0, 1.0, 1.0],
 )
@@ -478,7 +478,7 @@ world.scene.add(object)
 #     position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
 
 # Reference the standalone Robotiq Hand-E USD
-assets_dir = "/home/csrobot/Isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
+assets_dir = "/home/johnrobot/isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
 usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_convexDecomp_flattened.usd")
 gripper_prim_path = "/robotiq_gripper"
 add_reference_to_stage(
@@ -486,98 +486,23 @@ add_reference_to_stage(
     prim_path=gripper_prim_path
 )
 
-
-
-# finger_paths = [
-#     "/robotiq_gripper/base_link",
-#     "/robotiq_gripper/right_gripper",
-#     "/robotiq_gripper/left_gripper",
-#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_01",
-#     "/robotiq_gripper/right_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02",
-#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_01",
-#     "/robotiq_gripper/left_gripper/D_A03_ASM_DOIGTS_PARALLELES_1ROBOTIQ_HAND_E_DEFEATURE_02",
-#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_11ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_6ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_13ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_01",
-#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_10ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_24ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_02",
-#     "/robotiq_gripper/base_link/toothed_lock_washer_metric_robotiq_12ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_03",
-#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_7ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/socket_head_cap_screw_iso_robotiq_25ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_04",
-#     "/robotiq_gripper/base_link/Group2ROBOTIQ_HAND_E_DEFEATURE",
-#     "/robotiq_gripper/base_link/Group3ROBOTIQ_HAND_E_DEFEATURE_05",
-#     "/robotiq_gripper/base_link/Group1ROBOTIQ_HAND_E_DEFEATURE",
-# ]
-
-# # def disable_root_collision(path):
-# #     prim = stage.GetPrimAtPath(path)
-# #     if not prim or not prim.IsValid():
-# #         return
-# #     # turn off the default Xform‐level collider
-# #     api = UsdPhysics.CollisionAPI.Get(stage, prim.GetPath()) or UsdPhysics.CollisionAPI.Apply(prim)
-# #     api.GetCollisionEnabledAttr().Set(False)
-
-# # def configure_mesh(prim):
-# #     # 1) USD collision schema
-# #     UsdPhysics.CollisionAPI.Apply(prim)
-# #     # 2) PhysX collision schema
-# #     physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-# #     # 3) swap to convex‐decomposition (legal on dynamics)
-# #     setCollider(prim, "convexDecomposition")
-# #     # 4) tighten margins: 1 mm skin, 0 mm rest
-# #     physx_api.GetContactOffsetAttr().Set(1e-3)
-# #     physx_api.GetRestOffsetAttr() .Set(0.0)
-
-# # # --- A) disable the “ghost” colliders on the two root Xforms ---
-# # disable_root_collision("/World/object")
-# # disable_root_collision("/robotiq_gripper/base_link")
-
-# # # --- B) walk only the actual mesh prims under both hierarchies ---
-# # for root_path in ("/World/object", "/robotiq_gripper"):
-# #     root = stage.GetPrimAtPath(root_path)
-# #     if not root:
-# #         continue
-# #     for prim in Usd.PrimRange(root):
-# #         if prim.IsA(UsdGeom.Mesh):
-# #             configure_mesh(prim)
-
-
-
-
-
-# for path in finger_paths:
-#     prim = stage.GetPrimAtPath(path)
-#     if not prim or not prim.IsValid():
-#         print(f"⚠️ could not find prim at {path}")
-#         continue
-
-#     # 1) USD Collision API  
-#     UsdPhysics.CollisionAPI.Apply(prim)
-
-#     # 2) PhysX Collision API (returns the API object, so we can use it immediately)
-#     physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-
-#     # 3) switch to SDF (or "convexDecomposition")
-#     setCollider(prim, "convexDecomposition")
-
-#     # 4) zero out the padding on *this* API object
-#     physx_api.GetContactOffsetAttr().Set(0.001)
-#     physx_api.GetRestOffsetAttr() .Set(0.0)
-
-
 # wrap the prim as a robot (articulation)
 gripper = Robot(
     prim_path=gripper_prim_path,
     name="Hand-E",
-    position=[0.0, 0.5, 0.5],       
+    position=[0.0, 1.0, 1.0],       
 )
+
+# applies zero gravity to the gripper
+links = ["base_link", "left_gripper", "right_gripper"]
+for link in links:
+    prim_path = f"{gripper_prim_path}/{link}"
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        raise RuntimeError(f"Link prim not found: {prim_path!r}")
+    physxAPI = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+    physxAPI.CreateDisableGravityAttr(True)
+   
 
 # prim = stage.GetPrimAtPath(gripper_prim_path)
 # rb = UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -893,7 +818,7 @@ while trial < max_trials:
         # if object_in_gripper():
         reached_target = False
         count = 0
-        print('end reached target')
+        # print('end reached target')
     else:
         move_gripper_toward(gripper, target_point)
     
