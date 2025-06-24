@@ -35,6 +35,7 @@ from isaacsim.sensors.physx import ProximitySensor, register_sensor, clear_senso
 from isaacsim.core.api.robots import Robot
 from omni.physx.scripts.utils import setCollider
 # from isaacsim.core.api.action import ArticulationAction
+# from omni.isaac.core.articulations import ArticulationView, ArticulationViewCfg, ControlMode
 import os
 
 def visualize_point_sample(point: np.ndarray, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0)):
@@ -271,6 +272,12 @@ def reset_scene(stage, gripper, model, centroid):
     )
 
     world.reset()
+
+    # gripper.apply_action(open_action)
+    # for i in range(50):
+    #     gripper.apply_action(open_action)
+    #     world.step(render=True)
+    
     
     # Sample point around object and look at point
     # view_pos = position_lidar(centroid, 0.4)
@@ -479,21 +486,49 @@ if not stage.GetPrimAtPath(dome_path):
     dome.CreateColorAttr((1.0, 1.0, 1.0))
 
 # ─────────────────── OBJECT ─────────────────────────────────────────────
+mat_path   = Sdf.Path("/World/Materials/object_default")
+object_mat = UsdShade.Material.Define(stage, mat_path)
+
+# Preview Surface shader
+shader_path = mat_path.AppendChild("PreviewShader")
+shader = UsdShade.Shader.Define(stage, shader_path)
+shader.CreateIdAttr("UsdPreviewSurface")
+shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0, 0.0, 0.0))
+shader.CreateInput("metallic",      Sdf.ValueTypeNames.Float).Set(0.0)
+shader.CreateInput("roughness",     Sdf.ValueTypeNames.Float).Set(0.8)
+
+# Connect shader → material
+surface_output = shader.GetOutput("surface")
+mat_output     = object_mat.CreateSurfaceOutput()
+mat_output.ConnectToSource(surface_output)
+
+# Physics: high friction, max‐combine
+phys_api = UsdPhysics.MaterialAPI.Apply(object_mat.GetPrim())
+phys_api.CreateStaticFrictionAttr(10.0)
+phys_api.CreateDynamicFrictionAttr(10.0)
+phys_api.CreateRestitutionAttr(0.0)
+physx_api = PhysxSchema.PhysxMaterialAPI.Apply(object_mat.GetPrim())
+physx_api.CreateFrictionCombineModeAttr().Set("max")
+
+
 create_prim(
     prim_path="/World/object",
     prim_type="Xform",
     # usd_path="/home/csrobot/Isaac/assets/ycb/056_tennis_ball/textured.usdc"
     # usd_path="/home/csrobot/Isaac/assets/ycb/mustard/006_mustard_bottle.usd"
     # usd_path="/home/csrobot/Isaac/assets/ycb/engine/engine.usd"
-    usd_path="/home/johnrobot/isaac/assets/ycb/004_sugar_box.usd"
+    usd_path="/home/csrobot/Isaac/assets/ycb/cube.usd"
 )
 object = RigidPrim(
     prim_path="/World/object",
-    name="cracker_collision",
+    name="object_collision",
     position=[0.0, 0.0, 0.5],
     orientation=[1.0, 0.0, 0.0, 0.0],
-    scale=[1.0, 1.0, 1.0],
+    # scale=[1.0, 1.0, 1.0],
+    scale=[0.025, 0.025, 0.025],
 )
+UsdShade.MaterialBindingAPI(object.prim).Bind(object_mat)
 UsdPhysics.CollisionAPI.Apply(object.prim)
 world.scene.add(object)
 
@@ -504,7 +539,7 @@ world.scene.add(object)
 #     position=Gf.Vec3d(0, 0, 0.5), rotation_deg=0)
 
 # Reference the standalone Robotiq Hand-E USD
-assets_dir = "/home/johnrobot/isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
+assets_dir = "/home/csrobot/Isaac/assets/isaac-sim-assets-1@4.5.0-rc.36+release.19112.f59b3005/Assets/Isaac/4.5/Isaac/Robots/Robotiq/Hand-E"
 usd_path = os.path.join(assets_dir, "Robotiq_Hand_E_convexDecomp_flattened.usd")
 gripper_prim_path = "/robotiq_gripper"
 add_reference_to_stage(
@@ -530,8 +565,13 @@ for link in links:
     physxAPI.CreateDisableGravityAttr(True)
 
     # Give the gripper a ton of mass so it does not rotate when trying to pick something
-    mass_api = UsdPhysics.MassAPI.Apply(prim)
-    mass_api.GetMassAttr().Set(100000.0)  
+    if link == "base_link":
+        mass_api = UsdPhysics.MassAPI.Apply(prim)
+        mass_api.GetMassAttr().Set(100000.0)  
+    if link == "left_gripper" or "right_gripper":
+        mass_api = UsdPhysics.MassAPI.Apply(prim)
+        mass_api.GetMassAttr().Set(1.0)  
+
 
 # prim = stage.GetPrimAtPath(gripper_prim_path)
 # rb = UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -563,7 +603,7 @@ shader.CreateIdAttr("UsdPreviewSurface")
 shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
 shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0, 0.0, 0.0))
 shader.CreateInput("metallic",      Sdf.ValueTypeNames.Float).Set(0.0)
-shader.CreateInput("roughness",     Sdf.ValueTypeNames.Float).Set(0.8)
+shader.CreateInput("roughness",     Sdf.ValueTypeNames.Float).Set(1.0)
 
 # Connect shader → material
 surface_output = shader.GetOutput("surface")
@@ -572,8 +612,8 @@ mat_output.ConnectToSource(surface_output)
 
 # Physics: high friction, max‐combine
 phys_api = UsdPhysics.MaterialAPI.Apply(rubber_mat.GetPrim())
-phys_api.CreateStaticFrictionAttr(0.8)
-phys_api.CreateDynamicFrictionAttr(0.8)
+phys_api.CreateStaticFrictionAttr(10.0)
+phys_api.CreateDynamicFrictionAttr(10.2)
 phys_api.CreateRestitutionAttr(0.0)
 physx_api = PhysxSchema.PhysxMaterialAPI.Apply(rubber_mat.GetPrim())
 physx_api.CreateFrictionCombineModeAttr().Set("max")
@@ -632,26 +672,68 @@ for dof in ["Slider_1","Slider_2"]:
     pj = UsdPhysics.PrismaticJoint(stage.GetPrimAtPath(Sdf.Path(f"{gripper_prim_path}/{dof}")))
     pj.GetLowerLimitAttr().Set(-0.025)  # double the stroke
 
-
+# Torque control
 for dof in ["Slider_1","Slider_2"]:
     jp    = stage.GetPrimAtPath(Sdf.Path(f"{gripper_prim_path}/{dof}"))
     drive = UsdPhysics.DriveAPI.Apply(jp, "linear")
-    drive.CreateStiffnessAttr(1000.0)             # N/m
-    drive.CreateDampingAttr(50.0)           
-    drive.CreateMaxForceAttr(70.0)         # max N·s/m
+    drive.CreateStiffnessAttr(0.0)             # N/m
+    drive.CreateDampingAttr(0.0)           
+    drive.CreateMaxForceAttr(100.0)         # max N·s/m
     drive.CreateTargetVelocityAttr(0.001) 
     PhysxSchema.PhysxJointAPI.Apply(jp)
 
-efforts = np.full(len(slider_idxs), -0.005, dtype=np.float32)
+efforts = np.full(len(slider_idxs), -0.1, dtype=np.float32)
 close_action = ArticulationAction(
     joint_efforts = efforts,
     joint_indices = slider_idxs
 )
 
 open_action = ArticulationAction(
-    joint_efforts = np.full(len(slider_idxs), +0.01, dtype=np.float32),
+    joint_efforts = np.full(len(slider_idxs), +0.1, dtype=np.float32),
     joint_indices = slider_idxs
 )
+# --------------------------------
+
+# for dof in ["Slider_1", "Slider_2"]:
+#     jp    = stage.GetPrimAtPath(Sdf.Path(f"{gripper_prim_path}/{dof}"))
+#     drive = UsdPhysics.DriveAPI.Apply(jp, "linear")
+#     # position‐spring drive
+#     # drive.CreateTypeAttr().Set(UsdPhysics.Tokens.force)       
+#     drive.CreateStiffnessAttr().Set(1000.0)            
+#     drive.CreateDampingAttr().Set(1000.0)                
+#     drive.CreateMaxForceAttr().Set(70.0)                    
+#     # initial target can be open‐wide
+#     drive.CreateTargetPositionAttr().Set(0.025) 
+#     drive.CreateTargetVelocityAttr(0.001)  
+#     PhysxSchema.PhysxJointAPI.Apply(jp)
+    
+# # # world.reset()
+# # # world.step(render=False)
+
+# # # close
+# close_action = ArticulationAction(
+#     joint_positions = np.array([-0.015, -0.015]),
+#     joint_indices   = slider_idxs,
+#     joint_efforts = np.full(len(slider_idxs), -0.05, dtype=np.float32),
+# )
+
+# open_action = ArticulationAction(
+#     joint_positions = np.array([ 0.025,  0.025]),
+#     joint_indices   = slider_idxs,
+#     joint_efforts = np.full(len(slider_idxs), +0.05, dtype=np.float32),
+# )
+
+world.reset()
+world.step(render=False)
+
+# print([t for t in dir(UsdPhysics.Tokens) if not t.startswith("_")])
+
+# import inspect
+
+# # print out the class docstring and source
+# print(ArticulationAction.__doc__)
+# print(inspect.getsource(ArticulationAction))
+# print(inspect.signature(ArticulationAction.__init__))
 
 # ─────────────────── LIDAR SENSOR ───────────────────────────────────────────
 cone = UsdGeom.Cone.Define(stage, "/World/lidar_cone")
@@ -808,10 +890,10 @@ simulation_app.update()
 
 # ─────────────────── INITIALIZE SIMULATION ──────────────────────────────────
 world.reset()
-world.step()
+world.step(render=False)
 
 
-world.play()
+# world.play()
 
 # Trials!!!!
 trial = 0
@@ -824,7 +906,7 @@ target_point = reset_scene(stage, gripper, object, centroid)
 while trial < max_trials:
     world.step(render=True)
     # print(f'proximity distance: {proximity_distance}') 
-    reached_target = check_reached_target(proximity_distance, reach_threshold=0.01)
+    reached_target = check_reached_target(proximity_distance, reach_threshold=0.015)
     
    
     if reached_target:
@@ -865,4 +947,3 @@ while trial < max_trials:
     count += 1
 # Close the simulator
 simulation_app.close()
-
