@@ -258,7 +258,7 @@ def check_finger_contact():
 
 def reset_scene(world, stage, gripper, model, centroid, open_action):
 
-    model.set_linear_velocity([0.0,0.0,0.0])
+    model.set_linear_velocity([0.0,0.0,1.0])
     model.set_angular_velocity([0.0,0.0,0.0])
 
     gripper.set_linear_velocity([0.0,0.0,0.0])
@@ -270,13 +270,18 @@ def reset_scene(world, stage, gripper, model, centroid, open_action):
     )
 
     model.set_world_pose(
-        position    = [0.0, 0.0, 1.0],
+        position    = [0.0, 0.0, 0.0],
         orientation = [0.0, 0.0, 0.0, 1.0]
     )
     world.step(render=False)
 
     # Sample single point and lidar pose
-    sampled_point, normal = sample_point_and_normal("/World/object")
+    sampled_point, normal = sample_point_and_normal_cube("/World/object")
+    print("Sampled point:", sampled_point, "Normal:", normal)
+    sampled_point = np.array([-0.01202493, 0.00333428,  0.04999872])
+    normal = np.array([-1.11096409e-04 , 5.32646879e-05,  9.99999992e-01])
+
+    # sampled_point, normal = sample_point_and_normal("/World/object")
     view_pos = calculate_approach_pose(sampled_point, normal, standoff = 0.1)
 
     visualize_point_sample(sampled_point, stage, sphere_path="/World/marker_sphere", sphere_radius=0.005, color=(0,255,0))
@@ -524,3 +529,51 @@ def import_urdf_model(urdf_path: str, position=Gf.Vec3d(0.0, 0.0, 0.0), rotation
     robot = SingleArticulation(prim_path=prim_path, name="panda")
     world.scene.add(robot)
     return robot
+
+
+def sample_point_and_normal_cube(xform_path: str):
+    """
+    Uniformly sample a point + normal on the surface of a DynamicCuboid
+    whose prim is at xform_path (e.g. "/World/object").
+    This reads the prim's 'size' attr for local half-edge, then uses
+    XformCache to include any scale/rotation/translation in the matrix.
+    """
+    # 1) get the prim & size
+    if not xform_path.startswith("/"):
+        xform_path = "/" + xform_path
+    stage = omni.usd.get_context().get_stage()
+    prim  = stage.GetPrimAtPath(xform_path)
+    if not prim or not prim.IsValid():
+        raise RuntimeError(f"No prim at {xform_path!r}")
+
+    size_attr = prim.GetAttribute("size")
+    if not size_attr:
+        raise RuntimeError(f"Prim at {xform_path!r} has no 'size' attribute")
+    size = size_attr.Get()  # e.g. 1.0
+
+    # 2) pick a face & a random (u,v) in [–size/2, +size/2]
+    h = size / 2.0
+    face = np.random.randint(6)
+    u, v = (np.random.rand(2) - 0.5) * size
+
+    if   face == 0: local_pt, local_n = [ h,   u,   v], [ 1, 0, 0]
+    elif face == 1: local_pt, local_n = [-h,   u,   v], [-1, 0, 0]
+    elif face == 2: local_pt, local_n = [ u,   h,   v], [ 0, 1, 0]
+    elif face == 3: local_pt, local_n = [ u,  -h,   v], [ 0,-1, 0]
+    elif face == 4: local_pt, local_n = [ u,   v,   h], [ 0, 0, 1]
+    else:           local_pt, local_n = [ u,   v,  -h], [ 0, 0,-1]
+
+    # 3) transform into world space (point & normal)
+    cache  = UsdGeom.XformCache()
+    xf_mat = cache.GetLocalToWorldTransform(prim)
+
+    # world-space point
+    wp_gf    = xf_mat.Transform(Gf.Vec3d(*local_pt))
+    world_pt = np.array([wp_gf[i] for i in range(3)])
+
+    # world-space normal: apply inverse-transpose of 3×3 linear part
+    M3       = np.array([[xf_mat[i][j] for j in range(3)] for i in range(3)], float)
+    world_n  = np.linalg.inv(M3).T.dot(np.array(local_n, float))
+    world_n /= np.linalg.norm(world_n)
+
+    return world_pt, world_n
